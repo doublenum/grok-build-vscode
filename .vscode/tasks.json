@@ -1,0 +1,32 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "npm: build:webview",
+      "type": "shell",
+      "command": "bash",
+      "args": ["-l", "-c", "npm run build:webview"],
+      "group": "build",
+      "presentation": {
+        "echo": true,
+        "reveal": "silent",
+        "panel": "shared"
+      },
+      "problemMatcher": [],
+      "detail": "Uses login shell so custom Node 22 (in ~/.local) is found. See dev-reload.sh for the same PATH logic."
+    },
+    {
+      "label": "npm: watch (tsc)",
+      "type": "npm",
+      "script": "watch",
+      "isBackground": true,
+      "group": "build",
+      "presentation": {
+        "echo": true,
+        "reveal": "never",
+        "panel": "dedicated"
+      },
+      "problemMatcher": "$tsc-watch"
+    }
+  ]
+}

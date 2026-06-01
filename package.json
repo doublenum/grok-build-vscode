@@ -104,6 +104,14 @@
       {
         "command": "grok._debugDummyPlan",
         "title": "Grok: Debug — Show dummy plan card (for testing Approve/Reject/Cancel)"
+      },
+      {
+        "command": "grok.openInEditor",
+        "title": "Grok: Open in Editor Tab",
+        "icon": {
+          "light": "resources/grok-icon.svg",
+          "dark": "resources/grok-mark-light.svg"
+        }
       }
     ],
     "keybindings": [
@@ -138,6 +146,13 @@
           "command": "grok.sendFile",
           "when": "resourceScheme == file",
           "group": "grok@1"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "grok.openInEditor",
+          "group": "navigation",
+          "when": "true"
         }
       ]
     },
@@ -191,19 +206,33 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "tsc -p .",
+    "vscode:prepublish": "npm run build:webview && tsc -p .",
     "compile": "tsc -p .",
     "watch": "tsc -p . -w",
     "test": "vitest run",
     "test:watch": "vitest",
-    "package": "npx @vscode/vsce package --no-dependencies",
-    "publish": "npx @vscode/vsce publish --no-dependencies"
+    "package": "npx @vscode/vsce package --no-dependencies --out grok-build.vsix",
+    "publish": "npx @vscode/vsce publish --no-dependencies",
+    "build:webview": "vite build",
+    "dev:webview": "vite",
+    "package:dev": "./scripts/package.sh",
+    "dev": "./scripts/dev.sh",
+    "dev:watch": "./scripts/dev.sh --watch"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
     "@types/vscode": "^1.94.0",
+    "@vitejs/plugin-react": "^5.1.4",
     "happy-dom": "^20.9.0",
     "typescript": "^5.4.0",
+    "vite": "^7.3.1",
     "vitest": "^1.6.0"
+  },
+  "dependencies": {
+    "lucide-react": "^0.575.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
   }
 }

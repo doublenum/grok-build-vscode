@@ -261,7 +261,7 @@ VS Code commands (not Grok slash commands). Open with **Ctrl+Shift+P** / **Cmd+S
 ```bash
 npm install
 npm test         # 94 tests, <2s, vitest — no VS Code, no spawn (except terminal-manager)
-npm run package  # → grok-vscode-phuryn-<version>.vsix
+npm run package  # → grok-build.vsix
 ```
 
 Pure tests are the floor — every change should keep 94 green. The split was made *specifically* so protocol bugs can be caught without spinning up VS Code:

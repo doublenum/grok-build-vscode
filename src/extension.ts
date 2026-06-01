@@ -37,6 +37,7 @@ export function activate(context: vscode.ExtensionContext): void {
     // Internal debug helper for manually exercising the plan-review card UI
     // (Approve / Reject / Cancel flows) without a live CLI session.
     vscode.commands.registerCommand("grok._debugDummyPlan", () => sidebar.debugShowDummyPlan()),
+    vscode.commands.registerCommand("grok.openInEditor", () => sidebar.openInEditor()),
   );
 }
 

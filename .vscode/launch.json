@@ -1,0 +1,31 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": ["--extensionDevelopmentPath=${workspaceFolder}"],
+      "outFiles": ["${workspaceFolder}/out/**/*.js"],
+      "preLaunchTask": "npm: build:webview",
+      "presentation": {
+        "group": "grok",
+        "label": "Run Extension (rebuilds React editor tab)"
+      }
+    },
+    // If the preLaunchTask fails with "npm: command not found", use the (fast) config below
+    // and manually run `npm run build:webview` once in any terminal where `npm` works on this machine.
+    // (This repo pins Node 22 via ~/.local/... for Vite 7; see scripts/dev-reload.sh for the same logic.)
+    {
+      "name": "Run Extension (fast)",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": ["--extensionDevelopmentPath=${workspaceFolder}"],
+      "outFiles": ["${workspaceFolder}/out/**/*.js"],
+      "presentation": {
+        "group": "grok",
+        "label": "Run Extension (fast, assumes webview already built)"
+      }
+    }
+  ]
+}

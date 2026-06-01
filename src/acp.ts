@@ -3,10 +3,12 @@ import { createInterface, Interface } from "node:readline";
 import { EventEmitter } from "node:events";
 import {
   extractPromptMeta,
+  extractUserQuestion,
   makeAckResponse,
   makeExitPlanResponse,
   makePermissionResponse,
   makeRequest,
+  makeUserQuestionResponse,
   parseAcpLine,
   routeSessionUpdate,
 } from "./acp-dispatch";
@@ -74,6 +76,23 @@ export interface ExitPlanRequest {
   id: number | string;
   sessionId: string;
   plan: string;
+}
+
+export interface UserQuestionOption {
+  label: string;
+  description?: string;
+  optionId?: string;
+}
+export interface UserQuestion {
+  question: string;
+  options: UserQuestionOption[];
+  multiSelect?: boolean;
+  header?: string;
+}
+export interface UserQuestionRequest extends UserQuestion {
+  id: number | string;
+  sessionId: string;
+  questions?: UserQuestion[];   // full set when grok asks more than one
 }
 
 export interface FsReadHandler {
@@ -254,11 +273,19 @@ export class AcpClient extends EventEmitter {
     // current_mode_update will arrive as a session/update
   }
 
-  async prompt(text: string): Promise<PromptResultMeta> {
+  async prompt(content: string | Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>): Promise<PromptResultMeta> {
     if (!this.sessionId) throw new Error("no session");
+
+    let blocks: any[];
+    if (typeof content === "string") {
+      blocks = [{ type: "text", text: content }];
+    } else {
+      blocks = content;
+    }
+
     const result = await this.request("session/prompt", {
       sessionId: this.sessionId,
-      prompt: [{ type: "text", text }],
+      prompt: blocks,
     });
     const meta = extractPromptMeta(result);
     this.lastMeta = meta;
@@ -282,6 +309,11 @@ export class AcpClient extends EventEmitter {
   /** Respond to a pending exit_plan_mode request with the user's verdict. */
   respondExitPlan(requestId: number | string, type: "approved" | "abandoned" | "rejected"): void {
     this.writeLine(makeExitPlanResponse(requestId, type));
+  }
+
+  /** Respond to a pending ask_user_question request with the user's selection(s). */
+  respondUserQuestion(requestId: number | string, selections: { label: string; optionId?: string }[]): void {
+    this.writeLine(makeUserQuestionResponse(requestId, selections));
   }
 
   dispose(): void {
@@ -484,6 +516,16 @@ export class AcpClient extends EventEmitter {
         this.emit("xaiPromptComplete", params);
         if (id != null) this.respondOk(id, {});
         return;
+      }
+
+      // grok's ask_user_question tool elicits an answer via a server→client
+      // request. The method name varies across CLI builds, so we detect it by
+      // shape: a params object carrying a `questions` array of {question,options}.
+      // grok's deserializer requires the reply to carry a top-level `outcome`.
+      const q = extractUserQuestion(params);
+      if (q && id != null) {
+        this.emit("userQuestionRequest", { id, sessionId: params?.sessionId ?? this.sessionId ?? "", ...q });
+        return; // answered asynchronously via respondUserQuestion()
       }
 
       // unknown server request: emit + ack so the agent doesn't hang

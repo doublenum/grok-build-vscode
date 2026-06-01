@@ -219,6 +219,7 @@ describe("ACP integration (real subprocess, fake CLI)", () => {
     expect(blocked).toHaveLength(1);
     expect(blocked[0].kind).toBe("write");
     expect(blocked[0].target).toBe("relative-file.ts");
+    await waitForStderr(stderr, /WRITE_RESPONSE.*"error"/);
     expect(stderr.join("")).toMatch(/WRITE_RESPONSE.*"error"/);
     expect(fs.existsSync(path.join(workspace, "relative-file.ts"))).toBe(false);
   });

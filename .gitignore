@@ -5,3 +5,8 @@ out/
 .vscode-test/
 .DS_Store
 .env
+
+# Per-dev / one-off research probes (the *.cjs fixtures are intentionally committed)
+research/*.log
+cleanup-plan.md
+POST_NOTES.md

@@ -1,13 +1,93 @@
 import { describe, it, expect } from "vitest";
 import {
   extractPromptMeta,
+  extractUserQuestion,
   makeAckResponse,
   makeExitPlanResponse,
   makePermissionResponse,
   makeRequest,
+  makeUserQuestionResponse,
   parseAcpLine,
+  planModeToolSignal,
   routeSessionUpdate,
 } from "../src/acp-dispatch";
+
+describe("planModeToolSignal", () => {
+  it("detects grok's EnterPlanMode tool by rawInput.variant", () => {
+    expect(planModeToolSignal({ rawInput: { variant: "EnterPlanMode" } })).toBe("enter");
+  });
+
+  it("detects ExitPlanMode by variant or tool/name", () => {
+    expect(planModeToolSignal({ rawInput: { variant: "ExitPlanMode" } })).toBe("exit");
+    expect(planModeToolSignal({ tool: "ExitPlanMode" })).toBe("exit");
+    expect(planModeToolSignal({ name: "exit_plan_mode" })).toBe("exit");
+  });
+
+  it("does NOT misfire on a grep whose pattern merely contains the tool name", () => {
+    // The exact failure mode we hit with subagent detection: a Grep call whose
+    // pattern is "EnterPlanMode" must stay a grep (variant "Grep"), not a signal.
+    expect(
+      planModeToolSignal({ title: "EnterPlanMode", rawInput: { variant: "Grep", pattern: "EnterPlanMode" } }),
+    ).toBeNull();
+  });
+
+  it("returns null for ordinary tools and junk", () => {
+    expect(planModeToolSignal({ rawInput: { variant: "Bash" } })).toBeNull();
+    expect(planModeToolSignal({ tool: "read_file" })).toBeNull();
+    expect(planModeToolSignal(null)).toBeNull();
+    expect(planModeToolSignal({})).toBeNull();
+  });
+});
+
+describe("extractUserQuestion", () => {
+  const params = {
+    questions: [
+      {
+        question: "What do you want me to make a plan for?",
+        options: [
+          { label: "Improve the picker", description: "Plan changes to the file selector" },
+          { label: "Something else", description: "Different scope" },
+        ],
+        multiSelect: null,
+      },
+    ],
+  };
+
+  it("normalizes a questions[] payload by shape (no method name needed)", () => {
+    const q = extractUserQuestion(params);
+    expect(q).not.toBeNull();
+    expect(q!.question).toBe("What do you want me to make a plan for?");
+    expect(q!.options.map((o) => o.label)).toEqual(["Improve the picker", "Something else"]);
+    expect(q!.options[0].description).toBe("Plan changes to the file selector");
+    expect(q!.multiSelect).toBe(false);
+  });
+
+  it("also reads questions nested under input{}", () => {
+    expect(extractUserQuestion({ input: params })!.question).toBe(params.questions[0].question);
+  });
+
+  it("returns null when there is no question shape", () => {
+    expect(extractUserQuestion(null)).toBeNull();
+    expect(extractUserQuestion({})).toBeNull();
+    expect(extractUserQuestion({ questions: [{ question: "hi" }] })).toBeNull(); // no options[]
+    expect(extractUserQuestion({ foo: "bar" })).toBeNull();
+  });
+
+  it("coerces bare string options to labels", () => {
+    const q = extractUserQuestion({ questions: [{ question: "Pick", options: ["a", "b"] }] });
+    expect(q!.options.map((o) => o.label)).toEqual(["a", "b"]);
+  });
+});
+
+describe("makeUserQuestionResponse", () => {
+  it("includes the top-level outcome field grok requires", () => {
+    const r = makeUserQuestionResponse(7, [{ label: "Improve the picker", optionId: "opt1" }]) as any;
+    expect(r.id).toBe(7);
+    expect(r.result.outcome).toBe("selected");
+    expect(r.result.answers).toEqual(["Improve the picker"]);
+    expect(r.result.selectedOptions).toEqual([{ optionId: "opt1", label: "Improve the picker" }]);
+  });
+});
 
 describe("parseAcpLine", () => {
   it("returns null for empty / whitespace", () => {

@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { AcpClient, EffortLevel, ExitPlanRequest, PermissionRequest } from "./acp";
+import { AcpClient, EffortLevel, ExitPlanRequest, PermissionRequest, UserQuestionRequest } from "./acp";
 import { locateGrokCli } from "./cli-locator";
 import { TerminalManager } from "./terminal-manager";
 import {
@@ -13,6 +13,7 @@ import {
   toggleChip,
 } from "./chips";
 import { buildPrompt } from "./prompt-builder";
+import { planModeToolSignal } from "./acp-dispatch";
 import { parseFileRef, shouldReadFileInline } from "./file-ref";
 import { pickRejectOption, shouldRejectPermission } from "./plan-gate";
 import { appendPlanEntry, decideRestoreState } from "./plan-restore";
@@ -30,7 +31,7 @@ import {
 
 type WebviewMsg =
   | { type: "ready" }
-  | { type: "send"; text: string; chips: FileChip[] }
+  | { type: "send"; text: string; chips: FileChip[]; images?: Array<{ dataUrl: string; name?: string }> }
   | { type: "newSession" }
   | { type: "cancel" }
   | { type: "pickModel" }
@@ -45,8 +46,10 @@ type WebviewMsg =
   | { type: "openProjectConfig" }
   | { type: "runMcpList" }
   | { type: "showLogs" }
+  | { type: "openInEditor" }
   | { type: "dropFile"; path: string; shift: boolean }
   | { type: "permissionAnswer"; requestId: number | string; optionId: string }
+  | { type: "answerQuestion"; requestId: number | string; selections: { label: string; optionId?: string }[] }
   | { type: "exitPlanAnswer"; requestId: number | string; verdict: "approved" | "abandoned" | "rejected"; comment?: string }
   | { type: "setModel"; modelId: string }
   | { type: "runInstallCmd" }
@@ -56,7 +59,10 @@ type WebviewMsg =
   | { type: "resumeSession"; id: string }
   | { type: "renameSession"; id: string; name: string }
   | { type: "deleteSession"; id: string; name?: string }
-  | { type: "pickFile" };
+  | { type: "pickFile" }
+  | { type: "mentionFile" }
+  | { type: "listProjectFiles" }
+  | { type: "mentionPath"; path: string };
 
 const SESSION_META_KEY = "grok.sessionMeta";
 
@@ -66,9 +72,18 @@ const SESSION_META_KEY = "grok.sessionMeta";
 // "default".
 const ACT_MODE_ID = "default";
 
+// Scheme for the read-only diff-preview virtual documents (see openDiffEditor).
+const DIFF_SCHEME = "grok-diff";
+
 export class GrokSidebar implements vscode.WebviewViewProvider {
   public static readonly viewId = "grok.chat";
+  // Each GrokSidebar instance drives exactly ONE surface — either the sidebar
+  // view OR a single editor-tab panel — with its own grok client and session.
+  // "Open in Editor Tab" spins up a fresh independent instance (see openInEditor),
+  // so the sidebar and every tab are separate conversations.
   private view?: vscode.WebviewView;
+  private panel?: vscode.WebviewPanel;
+  private disposed = false;
   private client?: AcpClient;
   private output: vscode.OutputChannel;
   private chips: FileChip[] = [];
@@ -105,6 +120,11 @@ export class GrokSidebar implements vscode.WebviewViewProvider {
   private activeSessionId?: string;
   private titleGenerated = false;
   private firstUserMessageForTitle?: string;
+  // First webview "ready" bootstraps the session; later ones only re-sync.
+  private bootstrapped = false;
+  private diffContents = new Map<string, string>();
+  private diffSeq = 0;
+  private diffProviderDisposable?: vscode.Disposable;
 
   constructor(
     private context: vscode.ExtensionContext,
@@ -120,9 +140,12 @@ export class GrokSidebar implements vscode.WebviewViewProvider {
       localResourceRoots: [
         vscode.Uri.joinPath(this.context.extensionUri, "media"),
         vscode.Uri.joinPath(this.context.extensionUri, "resources"),
+        vscode.Uri.joinPath(this.context.extensionUri, "out", "webview"),
       ],
     };
-    view.webview.html = this.getHtml(view.webview);
+    // The sidebar and the editor tab now render the SAME React webview, so the
+    // two surfaces look and behave identically (single implementation, no drift).
+    view.webview.html = this.getReactWebviewHtml(view.webview);
     view.webview.onDidReceiveMessage((m: WebviewMsg) => this.onMessage(m));
     this.watchActiveEditor();
   }
@@ -145,6 +168,49 @@ export class GrokSidebar implements vscode.WebviewViewProvider {
 
   newSession(): void {
     void this.startSession();
+  }
+
+  /**
+   * Opens the Grok chat in a full editor tab. Each call spawns a NEW, fully
+   * independent session: a brand-new GrokSidebar controller with its own grok
+   * client, conversation, model, mode, and token count. Nothing is shared with
+   * the sidebar or with other tabs.
+   */
+  openInEditor(): void {
+    const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.Active;
+    const panel = vscode.window.createWebviewPanel(
+      "grok.chatEditor",
+      "Grok",
+      column,
+      {
+        enableScripts: true,
+        retainContextWhenHidden: true,
+        localResourceRoots: [
+          vscode.Uri.joinPath(this.context.extensionUri, "media"),
+          vscode.Uri.joinPath(this.context.extensionUri, "resources"),
+          vscode.Uri.joinPath(this.context.extensionUri, "out", "webview"),
+        ],
+      }
+    );
+    // A separate controller owns this panel's session, so it doesn't mirror us.
+    const controller = new GrokSidebar(this.context, this.output);
+    controller.attachPanel(panel);
+  }
+
+  /** Bind this (fresh) controller to an editor-tab panel as its only surface. */
+  attachPanel(panel: vscode.WebviewPanel): void {
+    this.panel = panel;
+    // White Grok mark on dark themes; currentColor mark on light themes.
+    panel.iconPath = {
+      light: vscode.Uri.joinPath(this.context.extensionUri, "resources", "grok-icon.svg"),
+      dark: vscode.Uri.joinPath(this.context.extensionUri, "resources", "grok-mark-light.svg"),
+    };
+    panel.webview.html = this.getReactWebviewHtml(panel.webview);
+    panel.webview.onDidReceiveMessage((m: WebviewMsg) => this.onMessage(m));
+    // When the tab closes, tear down its grok client + watchers.
+    panel.onDidDispose(() => this.dispose());
+    this.watchActiveEditor();
+    // The webview posts "ready" → onWebviewReady → startSession (own client).
   }
 
   async pickModel(): Promise<void> {
@@ -229,6 +295,12 @@ See design doc for the full state machine diagram.`;
     return "agent";
   }
 
+  private postModelChanged(modelId: string | undefined): void {
+    if (!modelId) return;
+    const m = this.client?.availableModels.find((x) => x.modelId === modelId);
+    this.post({ type: "modelChanged", modelId, totalContextTokens: m?.totalContextTokens });
+  }
+
   private postMode(): void {
     this.post({ type: "modeChanged", modeId: this.displayMode() });
   }
@@ -238,6 +310,22 @@ See design doc for the full state machine diagram.`;
     this.planActive = v;
     if (this.client) this.client.planActive = v;
     this.postMode();
+  }
+
+  /**
+   * grok 0.2.x enters plan mode by *calling an `EnterPlanMode` tool* instead of
+   * emitting `current_mode_update: plan`, so our modeChanged handler never fired
+   * and "entering plan mode did nothing". Raise the gate (and flip the mode
+   * button to Plan) the moment that tool appears. We deliberately do NOT lower
+   * the gate on `ExitPlanMode`: exit still routes through the blocking
+   * `x.ai/exit_plan_mode` request → plan-review card, and the gate is only
+   * lowered by an explicit user verdict (mirrors the modeChanged policy).
+   */
+  private handlePlanModeTool(call: any): void {
+    if (planModeToolSignal(call) === "enter" && !this.planActive) {
+      this.autoApprove = false;
+      this.setPlanActive(true);
+    }
   }
 
   async setMode(modeId: "agent" | "plan" | "yolo"): Promise<void> {
@@ -465,8 +553,15 @@ See design doc for the full state machine diagram.`;
   }
 
   dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.sessionGen++;          // invalidate any in-flight client callbacks
     this.client?.dispose();
+    this.client = undefined;
     this.editorWatcher?.dispose();
+    this.editorWatcher = undefined;
+    this.diffProviderDisposable?.dispose();
+    this.diffProviderDisposable = undefined;
     this.terminalManager.disposeAll();
   }
 
@@ -573,7 +668,7 @@ See design doc for the full state machine diagram.`;
     });
     client.on("modelChanged", (id) => {
       if (gen !== this.sessionGen) return;
-      this.post({ type: "modelChanged", modelId: id });
+      this.postModelChanged(id);
     });
     client.on("modeChanged", (id) => {
       if (gen !== this.sessionGen) return;
@@ -619,11 +714,13 @@ See design doc for the full state machine diagram.`;
     client.on("toolCall", (u) => {
       if (gen !== this.sessionGen) return;
       this.inUserMessage = false;
+      this.handlePlanModeTool(u);
       this.post({ type: "toolCall", call: u });
     });
     client.on("toolCallUpdate", (u) => {
       if (gen !== this.sessionGen) return;
       this.inUserMessage = false;
+      this.handlePlanModeTool(u);
       this.post({ type: "toolCallUpdate", call: u });
     });
     client.on("plan", (u) => {
@@ -634,7 +731,6 @@ See design doc for the full state machine diagram.`;
         (typeof u?.planText === "string" ? u.planText : "") ||
         (typeof u?.content === "string" ? u.content : "") ||
         (typeof u?.content?.text === "string" ? u.content.text : "");
-      this.output.appendLine(`[plan] event payload keys: ${Object.keys(u ?? {}).join(", ")}`);
     });
     client.on("promptComplete", (meta) => {
       if (gen !== this.sessionGen) return;
@@ -671,6 +767,10 @@ See design doc for the full state machine diagram.`;
         if (opt) { client.respondPermission(req.id, opt.optionId); return; }
       }
       this.post({ type: "permissionRequest", req });
+    });
+    client.on("userQuestionRequest", (req: UserQuestionRequest) => {
+      if (gen !== this.sessionGen) return;
+      this.post({ type: "userQuestion", req });
     });
     client.on("mutationBlocked", (info: { kind: string; target: string }) => {
       if (gen !== this.sessionGen) return;
@@ -784,10 +884,10 @@ See design doc for the full state machine diagram.`;
   private async onMessage(msg: WebviewMsg): Promise<void> {
     switch (msg.type) {
       case "ready":
-        this.postInitialState();
+        this.onWebviewReady();
         break;
       case "send":
-        await this.handleSend(msg.text, msg.chips);
+        await this.handleSend(msg.text, msg.chips, msg.images);
         break;
       case "newSession":
         await this.startSession();
@@ -817,19 +917,18 @@ See design doc for the full state machine diagram.`;
           if (root) p = path.join(root, p);
         }
         const uri = vscode.Uri.file(p);
-        if (ref.startLine != null) {
-          const startLine = Math.max(0, ref.startLine - 1);
-          const endLine = ref.endLine != null ? Math.max(startLine, ref.endLine - 1) : startLine;
-          try {
-            const doc = await vscode.workspace.openTextDocument(uri);
-            await vscode.window.showTextDocument(doc, {
-              selection: new vscode.Range(startLine, 0, endLine, Number.MAX_SAFE_INTEGER),
-            });
-          } catch {
-            void vscode.commands.executeCommand("vscode.open", uri);
+        const viewColumn = this.auxViewColumn();
+        try {
+          const doc = await vscode.workspace.openTextDocument(uri);
+          const opts: vscode.TextDocumentShowOptions = { viewColumn, preview: false };
+          if (ref.startLine != null) {
+            const startLine = Math.max(0, ref.startLine - 1);
+            const endLine = ref.endLine != null ? Math.max(startLine, ref.endLine - 1) : startLine;
+            opts.selection = new vscode.Range(startLine, 0, endLine, Number.MAX_SAFE_INTEGER);
           }
-        } else {
-          void vscode.commands.executeCommand("vscode.open", uri);
+          await vscode.window.showTextDocument(doc, opts);
+        } catch {
+          void vscode.commands.executeCommand("vscode.open", uri, viewColumn);
         }
         break;
       }
@@ -844,6 +943,9 @@ See design doc for the full state machine diagram.`;
         break;
       case "permissionAnswer":
         this.client?.respondPermission(msg.requestId, msg.optionId);
+        break;
+      case "answerQuestion":
+        this.client?.respondUserQuestion(msg.requestId, msg.selections);
         break;
       case "exitPlanAnswer":
         this.handleExitPlan(msg.requestId, msg.verdict, msg.comment);
@@ -938,6 +1040,9 @@ See design doc for the full state machine diagram.`;
       case "showLogs":
         this.output.show();
         break;
+      case "openInEditor":
+        this.openInEditor();
+        break;
       case "runInstallCmd": {
         const term = vscode.window.createTerminal("Install Grok");
         term.show();
@@ -982,6 +1087,18 @@ See design doc for the full state machine diagram.`;
       case "pickFile":
         await this.pickFileFromComputer();
         break;
+      case "mentionFile":
+        await this.mentionProjectFile();
+        break;
+      case "listProjectFiles":
+        await this.postProjectFiles();
+        break;
+      case "mentionPath": {
+        const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const abs = root && !path.isAbsolute(msg.path) ? path.join(root, msg.path) : msg.path;
+        this.addDroppedFile(abs, false);
+        break;
+      }
     }
 
   }
@@ -1066,20 +1183,71 @@ See design doc for the full state machine diagram.`;
     this.reveal();
   }
 
+  // "Add context" — quick-pick a file from the open workspace (relative paths,
+  // excluding node_modules/.git) and attach it as a chip. Distinct from
+  // pickFileFromComputer's OS dialog, which can reach files anywhere on disk.
+  private async mentionProjectFile(): Promise<void> {
+    if (!vscode.workspace.workspaceFolders?.length) {
+      void vscode.window.showInformationMessage("Open a folder to mention files from this project.");
+      return;
+    }
+    const uris = await vscode.workspace.findFiles("**/*", "**/{node_modules,.git,dist,out}/**", 2000);
+    if (!uris.length) return;
+    const items = uris
+      .map((uri) => ({ label: vscode.workspace.asRelativePath(uri), uri }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+    const picked = await vscode.window.showQuickPick(items, {
+      placeHolder: "Mention a file from this project",
+      matchOnDescription: true,
+    });
+    if (!picked) return;
+    this.addDroppedFile(picked.uri.fsPath, false);
+    this.reveal();
+  }
+
+  // Feed the in-composer @-mention dropdown: the workspace file list (relative
+  // paths, excluding the usual noise dirs). The webview filters it client-side.
+  private async postProjectFiles(): Promise<void> {
+    if (!vscode.workspace.workspaceFolders?.length) {
+      this.post({ type: "projectFiles", files: [] });
+      return;
+    }
+    const uris = await vscode.workspace.findFiles("**/*", "**/{node_modules,.git,dist,out}/**", 2000);
+    const files = uris.map((uri) => vscode.workspace.asRelativePath(uri)).sort((a, b) => a.localeCompare(b));
+    this.post({ type: "projectFiles", files });
+  }
+
+  // The diff preview is read-only on purpose: it shows grok's *proposed* change,
+  // not an editable file. We serve both sides from an in-memory
+  // TextDocumentContentProvider under a custom scheme — virtual documents from a
+  // provider are read-only, so closing the tab never prompts to save (the old
+  // untitled-doc approach did). Keyed by a per-diff counter so each preview is
+  // independent; the basename in the path drives syntax highlighting.
+  /** Column to open auxiliary editors (file refs, diffs) in. From an editor-tab
+   *  webview, open beside the chat so the conversation stays visible instead of
+   *  the file taking over the chat's own editor group; from the sidebar the
+   *  active editor area is already the right target. */
+  private auxViewColumn(): vscode.ViewColumn {
+    return this.panel ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
+  }
+
   private async openDiffEditor(filePath: string, oldText: string, newText: string): Promise<void> {
-    const tmp = vscode.Uri.parse(`untitled:${filePath}.before`);
-    const after = vscode.Uri.file(filePath);
-    // Write oldText into a virtual untitled doc, then diff against the file on disk that contains newText.
-    const beforeDoc = await vscode.workspace.openTextDocument({ content: oldText, language: "plaintext" });
-    const afterDoc = await vscode.workspace.openTextDocument({ content: newText, language: "plaintext" });
-    await vscode.commands.executeCommand(
-      "vscode.diff",
-      beforeDoc.uri,
-      afterDoc.uri,
-      `Grok proposed: ${path.basename(filePath)}`,
-    );
-    // (tmp/after refs intentionally unused — we use openTextDocument's auto URIs)
-    void tmp; void after;
+    this.ensureDiffProvider();
+    const id = ++this.diffSeq;
+    const base = path.basename(filePath) || "file";
+    const beforeUri = vscode.Uri.from({ scheme: DIFF_SCHEME, path: `/${base}`, query: `id=${id}&side=before` });
+    const afterUri = vscode.Uri.from({ scheme: DIFF_SCHEME, path: `/${base}`, query: `id=${id}&side=after` });
+    this.diffContents.set(beforeUri.toString(), oldText);
+    this.diffContents.set(afterUri.toString(), newText);
+    await vscode.commands.executeCommand("vscode.diff", beforeUri, afterUri, `Grok proposed: ${base}`, { preview: true, viewColumn: this.auxViewColumn() });
+  }
+
+  private ensureDiffProvider(): void {
+    if (this.diffProviderDisposable) return;
+    this.diffProviderDisposable = vscode.workspace.registerTextDocumentContentProvider(DIFF_SCHEME, {
+      provideTextDocumentContent: (uri) => this.diffContents.get(uri.toString()) ?? "",
+    });
+    this.context.subscriptions.push(this.diffProviderDisposable);
   }
 
   private async postExitPlanRequest(req: ExitPlanRequest, gen: number): Promise<void> {
@@ -1172,12 +1340,16 @@ See design doc for the full state machine diagram.`;
     this.postChips();
   }
 
-  private async handleSend(text: string, chips: FileChip[]): Promise<void> {
+  private async handleSend(
+    text: string,
+    chips: FileChip[],
+    images?: Array<{ dataUrl: string; name?: string }>
+  ): Promise<void> {
     const client = await this.ensureClient();
     if (!client) return;
     const gen = this.sessionGen;
 
-    const finalPrompt = buildPrompt(text, chips, {
+    const finalTextPrompt = buildPrompt(text, chips, {
       readFile: (p) => fs.readFileSync(p, "utf8"),
       extName: (p) => path.extname(p),
     });
@@ -1190,12 +1362,34 @@ See design doc for the full state machine diagram.`;
     if (isFirstSend) this.firstUserMessageForTitle = text;
     const sentChips = chips.filter((c) => !c.hidden);
     this.userMessageCount += 1;
-    this.inUserMessage = false; // live send isn't part of the streamed-chunk count path
-    this.post({ type: "userMessage", text, chips: sentChips });
+    this.inUserMessage = false;
+
+    // Post user message (with images if any)
+    this.post({ type: "userMessage", text, chips: sentChips, images: images || [] });
     this.post({ type: "agentStart" });
 
     try {
-      const meta = await client.prompt(finalPrompt);
+      // Build multimodal prompt if images present
+      let promptContent: string | any[];
+      if (images && images.length > 0) {
+        promptContent = [
+          { type: "text", text: finalTextPrompt },
+          ...images.map(img => {
+            // dataUrl is like "data:image/png;base64,...."
+            const match = img.dataUrl.match(/^data:(.+);base64,(.+)$/);
+            if (!match) return null;
+            return {
+              type: "image",
+              mimeType: match[1],
+              data: match[2],
+            };
+          }).filter(Boolean)
+        ];
+      } else {
+        promptContent = finalTextPrompt;
+      }
+
+      const meta = await client.prompt(promptContent as any);
       if (gen !== this.sessionGen) return; // session was switched mid-turn
       // Skip agentEnd if a verdict was clicked mid-turn (afterTurn is queued).
       // Otherwise busy clears here, then the user could send during the brief
@@ -1225,18 +1419,38 @@ See design doc for the full state machine diagram.`;
     if (!sid || !first) return;
     this.titleGenerated = true;
     const overrides = this.context.globalState.get<SessionMetaOverrides>(SESSION_META_KEY, {});
-    if (overrides[sid]?.customName) return;
-    const cleaned = first.replace(/\s+/g, " ").trim();
-    if (!cleaned) return;
-    const title = cleaned.length > 50 ? cleaned.slice(0, 47) + "…" : cleaned;
-    const next: SessionMetaOverrides = {
-      ...overrides,
-      [sid]: { ...(overrides[sid] ?? {}), customName: title },
-    };
-    void this.context.globalState.update(SESSION_META_KEY, next);
+    // Don't clobber a manual rename, but otherwise stash a first-message title as
+    // a low-priority fallback (grok's own summary still wins once it lands).
+    if (!overrides[sid]?.customName) {
+      const cleaned = first.replace(/\s+/g, " ").trim();
+      if (cleaned) {
+        const autoName = cleaned.length > 50 ? cleaned.slice(0, 47) + "…" : cleaned;
+        const next: SessionMetaOverrides = {
+          ...overrides,
+          [sid]: { ...(overrides[sid] ?? {}), autoName },
+        };
+        void this.context.globalState.update(SESSION_META_KEY, next);
+      }
+    }
+    // Push the resolved name live so the titlebar stops saying "New chat" the
+    // moment the first turn finishes — no waiting for the user to open history.
+    this.postSessionsList();
+    this.postActiveTitle();
   }
 
-  private postInitialState(): void {
+  /** Directly push the active session's best-known name to the webview. Covers the
+   *  window where grok hasn't flushed summary.json to disk yet, so listSessions
+   *  can't see the session and the titlebar would otherwise stay "New chat". */
+  private postActiveTitle(): void {
+    const sid = this.client?.sessionId ?? this.activeSessionId;
+    if (!sid) return;
+    const overrides = this.context.globalState.get<SessionMetaOverrides>(SESSION_META_KEY, {});
+    const o = overrides[sid];
+    const name = o?.customName?.trim() || o?.autoName?.trim();
+    if (name) this.post({ type: "sessionTitle", id: sid, name });
+  }
+
+  private postStateInfo(): void {
     const cfg = vscode.workspace.getConfiguration("grok");
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
     this.post({
@@ -1245,6 +1459,40 @@ See design doc for the full state machine diagram.`;
       cwd,
       useCtrlEnter: cfg.get("useCtrlEnterToSend", false),
     });
+  }
+
+  /**
+   * Handle a webview's "ready" handshake. Both the sidebar view and the editor
+   * tab send this when they load. The FIRST one bootstraps the session; any
+   * later one (e.g. the editor tab opened while the sidebar is already live)
+   * only re-syncs lightweight state. Restarting on every "ready" is what made
+   * session switching flaky — it clobbered the in-flight conversation.
+   */
+  private onWebviewReady(): void {
+    if (this.bootstrapped) {
+      this.postStateInfo();
+      this.postChips();
+      this.postMode();
+      // Re-send the model (with its context-window size) so a webview that
+      // connected AFTER the session started — e.g. a freshly opened editor tab —
+      // shows the correct window instead of the 200K default.
+      if (this.client) {
+        this.postModelChanged(this.client.currentModelId);
+        // Same late-join gap for slash commands: the live available_commands_update
+        // already fired, so re-send the retained list or "/" shows nothing.
+        if (this.client.availableCommands.length) {
+          this.post({ type: "commandsUpdate", commands: this.client.availableCommands });
+        }
+      }
+      return;
+    }
+    this.bootstrapped = true;
+    this.postInitialState();
+  }
+
+  private postInitialState(): void {
+    this.postStateInfo();
+    const cfg = vscode.workspace.getConfiguration("grok");
     if (cfg.get<boolean>("includeActiveFileByDefault", true)) {
       this.addActiveEditorChip();
     }
@@ -1268,11 +1516,16 @@ See design doc for the full state machine diagram.`;
   private post(message: any): void {
     if (this.suppressContent && GrokSidebar.SUPPRESS_TYPES.has(message.type)) return;
     if (this.suppressPlanReject && GrokSidebar.PLAN_REJECT_SUPPRESS.has(message.type)) return;
+
+    // One instance == one surface, so this posts only to this controller's own
+    // webview. Independent sessions never see each other's updates.
     this.view?.webview.postMessage(message);
+    this.panel?.webview.postMessage(message);
   }
 
   private reveal(): void {
-    this.view?.show?.(true);
+    if (this.panel) this.panel.reveal(vscode.ViewColumn.Active, true);
+    else this.view?.show?.(true);
   }
 
   private watchActiveEditor(): void {
@@ -1351,7 +1604,7 @@ See design doc for the full state machine diagram.`;
     <div class="welcome" id="welcome">
       <img src="${resourceUri("grok-mark-light.svg")}" alt="Grok" class="welcome-mark" />
       <h2>Grok Build</h2>
-      <p class="welcome-byline muted">by Paweł Huryn (<a href="https://www.productcompass.pm" class="muted-link">productcompass.pm</a>)</p>
+      <p class="welcome-byline muted" style="color: var(--vscode-errorForeground); font-weight: 600;">LOCAL BUILD DEV</p>
       <p id="welcome-version" class="muted">starting...</p>
       <div id="welcome-onboarding"></div>
     </div>
@@ -1386,6 +1639,31 @@ See design doc for the full state machine diagram.`;
   <script nonce="${nonce}" src="${mediaUri("webview-helpers.js")}"></script>
   <script nonce="${nonce}" src="${mediaUri("chat.js")}"></script>
 </body>
+</html>`;
+  }
+
+  /** React + Vite webview (used by both sidebar and editor-tab surfaces). */
+  private getReactWebviewHtml(webview: vscode.Webview): string {
+    const webviewDist = vscode.Uri.joinPath(this.context.extensionUri, "out", "webview");
+    const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(webviewDist, "assets", "main.js"));
+    const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(webviewDist, "assets", "main.css"));
+
+    // CSP: the React UI loads its bundled JS + CSS from the webview dist, uses
+    // VS Code theme tokens (inline styles from Vite need 'unsafe-inline'), and
+    // renders pasted/dropped images as data: URLs.
+    return `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src ${webview.cspSource}; font-src ${webview.cspSource} https:; img-src ${webview.cspSource} https: data:;">
+    <link rel="stylesheet" href="${styleUri}" />
+    <title>Grok Build</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script src="${scriptUri}"></script>
+  </body>
 </html>`;
   }
 }

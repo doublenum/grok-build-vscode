@@ -15,6 +15,10 @@ export interface SessionListEntry {
 
 export interface SessionMetaOverride {
   customName?: string;
+  /** Auto-derived title from the first user message. Lower priority than grok's
+   *  own session_summary so grok's standard summarization wins once it lands;
+   *  this only fills the gap before grok has written a summary. */
+  autoName?: string;
   pinnedAt?: number;
   /** Last verdict the user gave to an exit_plan_mode card in this session, for the restore-card label. */
   lastPlanVerdict?: "approved" | "rejected" | "abandoned";
@@ -118,7 +122,9 @@ export function listSessions(deps: ListDeps): SessionListEntry[] {
     const modelId = typeof raw?.current_model_id === "string" ? raw.current_model_id : undefined;
     const override = overrides[id];
     const customName = override?.customName?.trim() || undefined;
-    const displayName = customName || fallbackName(rawSummary, updatedAt);
+    const autoName = override?.autoName?.trim() || "";
+    // Priority: manual rename → grok's own summary → first-message auto title → date.
+    const displayName = customName || fallbackName(rawSummary || autoName, updatedAt);
     out.push({
       id,
       cwd: sessCwd,

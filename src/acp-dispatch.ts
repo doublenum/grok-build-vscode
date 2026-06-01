@@ -113,6 +113,77 @@ export function makeAckResponse(id: number | string, result: any = {}) {
   return { jsonrpc: "2.0", id, result };
 }
 
+// grok 0.2.x drives plan mode through `EnterPlanMode` / `ExitPlanMode` *tools*
+// (rawInput.variant === "EnterPlanMode") rather than the older
+// `current_mode_update` session event. Detect those tool calls so the host can
+// raise/lower the plan gate. We key on the tool's own identity (variant / tool /
+// name) — never the title — so a grep whose *pattern* contains "EnterPlanMode"
+// (variant "Grep") can't masquerade as a real plan-mode tool.
+export function planModeToolSignal(call: any): "enter" | "exit" | null {
+  if (!call || typeof call !== "object") return null;
+  const raw = call.rawInput || call.input || {};
+  const id = String(
+    (typeof raw.variant === "string" && raw.variant) || call.tool || call.name || "",
+  )
+    .toLowerCase()
+    .replace(/[^a-z]/g, "");
+  if (id === "enterplanmode") return "enter";
+  if (id === "exitplanmode") return "exit";
+  return null;
+}
+
+// grok's ask_user_question elicitation. The method name varies by CLI build, so
+// we recognize the request by shape: params carry a `questions` array (each with
+// a `question` string + `options[]`). Returns the normalized question(s) or null.
+export function extractUserQuestion(params: any): {
+  question: string;
+  options: { label: string; description?: string; optionId?: string }[];
+  multiSelect?: boolean;
+  header?: string;
+  questions?: any[];
+} | null {
+  if (!params || typeof params !== "object") return null;
+  const list = Array.isArray(params.questions)
+    ? params.questions
+    : Array.isArray(params.input?.questions)
+      ? params.input.questions
+      : null;
+  const first = list?.[0];
+  if (!first || typeof first.question !== "string" || !Array.isArray(first.options)) return null;
+  const norm = (o: any, i: number) => ({
+    label: typeof o === "string" ? o : String(o?.label ?? o?.name ?? o?.optionId ?? `Option ${i + 1}`),
+    description: typeof o === "object" ? o?.description : undefined,
+    optionId: typeof o === "object" ? (o?.optionId ?? o?.id) : undefined,
+  });
+  return {
+    question: first.question,
+    options: first.options.map(norm),
+    multiSelect: !!first.multiSelect,
+    header: first.header,
+    questions: list,
+  };
+}
+
+// Reply grok's deserializer accepts for ask_user_question: a top-level `outcome`
+// of "selected" plus the chosen answers (the missing `outcome` field was the
+// cause of "Client returned an invalid response … missing field `outcome`").
+export function makeUserQuestionResponse(
+  id: number | string,
+  selections: { label: string; optionId?: string }[],
+) {
+  return {
+    jsonrpc: "2.0",
+    id,
+    result: {
+      outcome: "selected",
+      // include several shapes so whichever field the CLI reads is satisfied
+      answers: selections.map((s) => s.label),
+      selectedOptions: selections.map((s) => ({ optionId: s.optionId, label: s.label })),
+      options: selections.map((s) => s.label),
+    },
+  };
+}
+
 export function makeRequest(id: number, method: string, params: any) {
   return { jsonrpc: "2.0", id, method, params };
 }

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### UI surfaces
+- **Open Grok chat in a full editor tab.** New command `Grok: Open in Editor Tab` (also available from the gear menu inside the chat as "Open in Editor Tab"). The chat can now live in a movable, resizable editor group exactly like the Claude Code extension experience, while the sidebar remains available. Each surface (sidebar or editor tab) owns an independent `GrokSidebar` controller and ACP session; only the React webview UI bundle is shared. All existing Plan Mode enforcement, effort selection, streaming, and history behavior work identically in the tab. (editor tab support)
+
 ## 1.2.3 — 2026-05-30
 
 ### Plan mode

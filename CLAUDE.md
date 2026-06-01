@@ -4,14 +4,14 @@ VS Code sidebar extension for **xAI's Grok Build CLI**, driven by `grok agent st
 
 ## Status
 
-v1.2.3 (published on the VS Code Marketplace). 223 tests passing, all grok-free (CI never spawns the binary; grok-dependent probes live separately in `research/*.cjs`). Smoke-tested end-to-end against `grok` v0.1.211 on Linux and Windows-via-WSL, and against the **native Windows build** `grok` 0.2.3 (`irm https://x.ai/cli/install.ps1 | iex`) — `cli-locator` resolves `grok.cmd`/`grok.exe` and `terminal-manager` uses `shell:true`. The native-Windows smoke test surfaced a handful of webview regressions (history popover that never closed, session rows only clickable on the label, reasoning traces no longer expandable, a cluttered welcome screen), all fixed in this build. Plan mode is now **enabled** and enforced client-side (see `research/plan-mode.md` § Resolution).
+Local dev build on `feat/open-in-editor-tab`. 243 tests passing (all grok-free). React + Vite webview (`webview/`) powers both the sidebar and "Grok: Open in Editor Tab" surfaces. Each surface (sidebar or editor tab) owns an independent `GrokSidebar` controller + `AcpClient` (deliberate design — no shared session). Hidden v3 primer (`src/grok-primer.ts`) is injected on every `session/new` + `session/load` to explain plan-verdict markers to the CLI (workaround for the CLI's `exit_plan_mode` tool always reporting "approved" regardless of user choice in the plan-review UI).
 
 ## Module map
 
 | File | Role |
 |---|---|
 | `src/extension.ts` | Entry point — registers commands, keybindings, output channel |
-| `src/sidebar.ts` | Webview provider, message routing, fs handlers, diff editor preview |
+| `src/sidebar.ts` | Webview provider, message routing, fs handlers, diff editor preview; owns one independent session per surface (sidebar or editor tab) |
 | `src/acp.ts` | ACP client — spawns CLI, manages session lifecycle, emits events |
 | `src/acp-dispatch.ts` | Pure protocol helpers — line parsing, update routing, response builders |
 | `src/cli-locator.ts` | Locate `grok` binary (configured path → `~/.grok/bin/grok` → PATH); cross-platform |
@@ -24,10 +24,12 @@ v1.2.3 (published on the VS Code Marketplace). 223 tests passing, all grok-free 
 | `src/sessions.ts` | Disk-driven session listing/delete + customName overrides (pure) |
 | `src/file-ref.ts` | Open-file `path#L<n>` ref parsing + large-file inline-read guard (pure) |
 | `src/plan-review.ts` | Plan-snapshot Markdown filename generation for the "open plan as editor tab" action (pure) |
-| `media/chat.{js,css}` | Webview UI |
-| `media/webview-helpers.js` | Pure webview helpers (file-ref detection, relative-time format); shared between webview and tests |
+| `src/grok-primer.ts` | Hidden v3 system prompt (injected on `session/new` + `session/load`) explaining plan verdict markers to the CLI |
+| `webview/` + `vite.config.ts` | React + Vite webview (primary UI for sidebar + editor tabs; built to `out/webview` by `npm run build:webview`) |
+| `media/chat.{js,css}` + `media/webview-helpers.js` | Legacy webview UI + helpers (used only by the DOM test harness; not loaded at runtime) |
 | `scripts/install.{ps1,sh}` | Auto-detect VS Code CLI, build .vsix, install |
 | `scripts/uninstall.{ps1,sh}` | Uninstall `PawelHuryn.grok-vscode-phuryn` |
+| `scripts/dev.sh`, `scripts/package.sh` | Local dev workflow + packaging (supports side-by-side published vs. dev builds via `--local`) |
 
 Pure modules (`acp-dispatch`, `chips`, `prompt-builder`, `slash-filter`, `cli-locator`, `sessions`, `plan-gate`, `plan-restore`, `file-ref`, `plan-review`, `webview-helpers`) were split out specifically so protocol behavior can be unit-tested without spawning processes.
 
@@ -35,8 +37,9 @@ Pure modules (`acp-dispatch`, `chips`, `prompt-builder`, `slash-filter`, `cli-lo
 
 ```bash
 npm install
-npm test         # 223 tests, ~1.4s, vitest — all grok-free (incl. happy-dom DOM tests + fake-CLI ACP integration tests)
-npm run package  # → grok-vscode-phuryn-1.2.3.vsix
+npm run build:webview   # React UI (required for sidebar + editor tabs)
+npm test                # 243 tests, ~1.8s, vitest — all grok-free
+npm run compile         # or npm run package (includes webview build via vscode:prepublish)
 ```
 
 ## Install
@@ -67,6 +70,7 @@ See `README.md § Install` for the full per-platform matrix.
 - No worktree UI
 - Diff editor is preview-only; the write happens via `fs/write_text_file` after approval
 - View defaults to left activity bar; user must drag to secondary side bar manually if desired
+- Legacy `media/chat.{js,css}` + DOM test harness (`webview-harness.ts` + *.dom.test.ts) still run the old renderer. All DOM tests exercise that path; the React webview surface (now used at runtime for sidebar + editor tabs) has only thin coverage (`tool-io.dom.test.ts`, `markdown.test.ts`). The dual implementation is the result of an in-progress migration; deleting the legacy surface requires migrating the entire test harness first.
 
 ## Cross-platform notes
 
@@ -76,11 +80,12 @@ See `README.md § Install` for the full per-platform matrix.
 
 ## What's next (priority order)
 
-1. `@vscode/test-electron` integration suite (scoped in `TESTS.md § v0.2`)
-2. Status-bar indicator (current model + effort + token usage)
-3. Subagent inspector (collapsible side panel)
-4. Worktree UI (`Grok: New Worktree Session`)
-5. Optional: auto-move view to secondary side bar on first activation (`workbench.action.moveView`)
+1. ~~Open Grok chat in editor tab (independent `GrokSidebar` + React webview for both sidebar and tabs)~~ — landed on this branch (React DOM test coverage remains thin; see Known limits).
+2. `@vscode/test-electron` integration suite (scoped in `TESTS.md § v0.2`)
+3. Status-bar indicator (current model + effort + token usage)
+4. Subagent inspector (collapsible side panel)
+5. Worktree UI (`Grok: New Worktree Session`)
+6. Optional: auto-move view to secondary side bar on first activation (`workbench.action.moveView`)
 
 ## Publishing
 
@@ -92,5 +97,5 @@ Per-release: bump version in `package.json`, `npm test`, `npm run publish`. The 
 - Commits explain the *why*, not the *what*
 - Don't introduce abstractions speculatively
 - Don't add comments that explain what well-named code already says
-- 223 tests is the floor — every PR should keep that green. All tests are grok-free (no binary spawn); grok-dependent probes live in `research/*.cjs` and are run manually, never by `npm test` or CI
+- 243 tests is the floor — every change should keep that green. All tests are grok-free (no binary spawn); grok-dependent probes live in `research/*.cjs` and are run manually, never by `npm test` or CI
 - **Version bumps are user-initiated.** Iterate at the current version (rebuild the same vsix and reinstall locally) until the user says to bump and publish. Don't bump `package.json` on your own.

@@ -339,12 +339,8 @@ code {
 
 /* ---- tool group ---- */
 
-.tool-flat {
-  font-size: 11px;
-  color: var(--vscode-descriptionForeground);
-  padding: 2px var(--pad);
-  font-family: var(--vscode-editor-font-family);
-}
+/* a lone tool call sheds the group chrome but stays an expandable IN/OUT card */
+.tool-item.tool-flat { padding: 4px 10px; }
 
 .tool-group {
   font-size: 11px;
@@ -398,17 +394,67 @@ code {
 }
 .tool-item {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
+  flex-direction: column;
+  gap: 3px;
   padding: 3px 10px;
   font-family: var(--vscode-editor-font-family);
+}
+.tool-item-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+.tool-item-chevron {
+  font-size: 12px;
+  line-height: 1;
+  flex-shrink: 0;
+  opacity: 0.45;
+  transition: transform 0.12s;
+}
+.tool-item.open .tool-item-chevron { transform: rotate(90deg); opacity: 0.7; }
+.tool-item-head:hover .tool-item-chevron { opacity: 0.7; }
+.tool-item-label { color: var(--vscode-foreground); }
+.tool-item-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 2px;
+  margin-left: 18px;
+}
+.tool-io-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+.io-label {
+  flex-shrink: 0;
+  width: 24px;
+  padding-top: 7px;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  opacity: 0.55;
+  text-transform: uppercase;
+}
+.tool-io {
+  flex: 1;
+  min-width: 0;
+  background: var(--vscode-textCodeBlock-background, var(--vscode-editorWidget-background));
+  border: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border));
+  border-radius: 6px;
+  font-family: var(--vscode-editor-font-family, ui-monospace, monospace);
+  font-size: 11px;
+  line-height: 1.45;
+  padding: 7px 9px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
 }
 .tool-item-subtitle {
   font-size: 10px;
   color: var(--vscode-descriptionForeground);
-  flex-basis: 100%;
-  margin-left: 0;
+  margin-left: 18px;
 }
 .tool-item .preview-link {
   background: none;
@@ -419,7 +465,7 @@ code {
   font-size: 11px;
   text-decoration: underline;
   text-align: left;
-  flex-basis: 100%;
+  margin-left: 18px;
 }
 .tool-kind {
   font-size: 10px;

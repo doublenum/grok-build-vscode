@@ -513,6 +513,10 @@
       vscode.postMessage({ type: "send", text: "/compact", chips: [] });
       closePopovers();
     });
+    addGearItem("<span>Open in Editor Tab</span>", () => {
+      vscode.postMessage({ type: "openInEditor" });
+      closePopovers();
+    });
 
     // ── Config ────────────────────────────────────────────────────────────
     addSection("Config");
@@ -1019,16 +1023,95 @@
     return name || "tool";
   }
 
+  // ---- expandable IN/OUT detail for a tool item (mirror of the editor-tab
+  // webview): the row label stays a one-line summary; clicking it reveals the
+  // raw input and output in bordered boxes with "in"/"out" gutter labels. ----
+
+  function toolItemInput(call) {
+    const r = call.rawInput || call.input || {};
+    if (r.command || r.cmd) return String(r.command || r.cmd);
+    const keys = Object.keys(r);
+    if (!keys.length) return "";
+    if (keys.length === 1 && typeof r[keys[0]] === "string") return r[keys[0]];
+    try { return JSON.stringify(r, null, 2); } catch (e) { return ""; }
+  }
+
+  function extractToolOutput(call) {
+    const c = call.content;
+    if (Array.isArray(c)) {
+      const texts = c
+        .map((it) => {
+          if (typeof it === "string") return it;
+          if (it && it.type === "diff") return ""; // surfaced via the diff preview link instead
+          return (it && it.text) || (it && it.content && it.content.text) || "";
+        })
+        .filter(Boolean);
+      if (texts.length) return texts.join("\n");
+    }
+    if (typeof call.rawOutput === "string") return call.rawOutput;
+    if (call.rawOutput) { try { return JSON.stringify(call.rawOutput, null, 2); } catch (e) { /* ignore */ } }
+    return "";
+  }
+
+  function ioRow(label, text) {
+    const row = document.createElement("div");
+    row.className = "tool-io-row";
+    const lab = document.createElement("span");
+    lab.className = "io-label";
+    lab.textContent = label;
+    const box = document.createElement("div");
+    box.className = "tool-io";
+    box.textContent = text;
+    row.appendChild(lab);
+    row.appendChild(box);
+    return row;
+  }
+
+  function renderToolItemBody(item) {
+    let bodyEl = item.querySelector(".tool-item-body");
+    const input = toolItemInput(item._call);
+    const output = item._output || "";
+    if (!item._open || (!input && !output)) {
+      if (bodyEl) bodyEl.hidden = true;
+      return;
+    }
+    if (!bodyEl) {
+      bodyEl = document.createElement("div");
+      bodyEl.className = "tool-item-body";
+      item.appendChild(bodyEl);
+    }
+    bodyEl.hidden = false;
+    bodyEl.replaceChildren();
+    if (input) bodyEl.appendChild(ioRow("in", input));
+    if (output) bodyEl.appendChild(ioRow("out", output));
+  }
+
+  function toggleToolItem(item) {
+    item._open = !item._open;
+    item.classList.toggle("open", item._open);
+    renderToolItemBody(item);
+  }
+
+  function setToolItemOutput(item, text) {
+    item._output = text;
+    if (item._open) renderToolItemBody(item);
+  }
+
   function closeToolGroup() {
     if (!state.activeToolGroupEl) return;
     const el = state.activeToolGroupEl;
     const calls = el._calls || [];
 
     if (calls.length === 1) {
-      const flat = document.createElement("div");
-      flat.className = "tool-flat";
-      flat.textContent = toolLabel(calls[0]);
-      el.replaceWith(flat);
+      // Single call: shed the group chrome but keep the item, which is itself an
+      // expandable IN/OUT card now, so its detail stays reachable.
+      const item = el.querySelector(".tool-item");
+      if (item) {
+        item.classList.add("tool-flat");
+        el.replaceWith(item);
+      } else {
+        el.remove();
+      }
     } else {
       el.classList.remove("in-progress");
       const hdr = el.querySelector(".tool-group-header");
@@ -1061,7 +1144,24 @@
 
     const item = document.createElement("div");
     item.className = "tool-item";
-    item.textContent = toolLabel(call);
+    item._call = call;
+    item._output = extractToolOutput(call);
+    item._open = false;
+
+    const head = document.createElement("div");
+    head.className = "tool-item-head";
+    const chevron = document.createElement("span");
+    chevron.className = "tool-item-chevron";
+    chevron.setAttribute("aria-hidden", "true");
+    chevron.textContent = "›";
+    const label = document.createElement("span");
+    label.className = "tool-item-label";
+    label.textContent = toolLabel(call);
+    head.appendChild(chevron);
+    head.appendChild(label);
+    head.onclick = () => toggleToolItem(item);
+    item.appendChild(head);
+
     body.appendChild(item);
     if (call.toolCallId) state.toolItemsByToolCallId.set(call.toolCallId, item);
 
@@ -1729,19 +1829,25 @@
         break;
       case "toolCallUpdate": {
         if (state.suppressReplayTurn) break;
-        const c = msg.call?.content;
+        const call = msg.call;
+        const c = call?.content;
         if (Array.isArray(c)) {
-          for (const item of c) {
-            if (item?.type === "diff") {
+          for (const part of c) {
+            if (part?.type === "diff") {
               const diff = {
-                path: item.path,
-                oldText: item.oldText ?? "",
-                newText: item.newText ?? "",
+                path: part.path,
+                oldText: part.oldText ?? "",
+                newText: part.newText ?? "",
               };
-              state.pendingDiffByToolCallId.set(msg.call.toolCallId, diff);
-              attachDiffPreviewToToolItem(msg.call.toolCallId, diff);
+              state.pendingDiffByToolCallId.set(call.toolCallId, diff);
+              attachDiffPreviewToToolItem(call.toolCallId, diff);
             }
           }
+        }
+        const toolItem = call?.toolCallId ? state.toolItemsByToolCallId.get(call.toolCallId) : null;
+        if (toolItem) {
+          const out = extractToolOutput(call);
+          if (out) setToolItemOutput(toolItem, out);
         }
         break;
       }

@@ -162,6 +162,63 @@ describe("listSessions", () => {
     expect(out[0].rawSummary).toBe("raw summary");
   });
 
+  it("uses autoName when there's no customName and grok has no summary yet", () => {
+    const fs = buildFs({
+      [dir]: { isDir: true },
+      [dirFor("a")]: { isDir: true },
+      [path.join(dirFor("a"), "summary.json")]: {
+        isDir: false,
+        content: JSON.stringify({
+          info: { id: "a", cwd },
+          session_summary: "",
+          updated_at: "2026-01-01T00:00:00Z",
+          num_messages: 1,
+        }),
+      },
+    });
+    const overrides: SessionMetaOverrides = { a: { autoName: "Fix the login bug" } };
+    const out = listSessions({ fs, grokHome, cwd, overrides });
+    expect(out[0].displayName).toBe("Fix the login bug");
+  });
+
+  it("prefers grok's session_summary over autoName once it lands", () => {
+    const fs = buildFs({
+      [dir]: { isDir: true },
+      [dirFor("a")]: { isDir: true },
+      [path.join(dirFor("a"), "summary.json")]: {
+        isDir: false,
+        content: JSON.stringify({
+          info: { id: "a", cwd },
+          session_summary: "Refactor auth middleware",
+          updated_at: "2026-01-01T00:00:00Z",
+          num_messages: 6,
+        }),
+      },
+    });
+    const overrides: SessionMetaOverrides = { a: { autoName: "first user message" } };
+    const out = listSessions({ fs, grokHome, cwd, overrides });
+    expect(out[0].displayName).toBe("Refactor auth middleware");
+  });
+
+  it("customName still beats both grok summary and autoName", () => {
+    const fs = buildFs({
+      [dir]: { isDir: true },
+      [dirFor("a")]: { isDir: true },
+      [path.join(dirFor("a"), "summary.json")]: {
+        isDir: false,
+        content: JSON.stringify({
+          info: { id: "a", cwd },
+          session_summary: "grok summary",
+          updated_at: "2026-01-01T00:00:00Z",
+          num_messages: 6,
+        }),
+      },
+    });
+    const overrides: SessionMetaOverrides = { a: { customName: "Renamed", autoName: "auto" } };
+    const out = listSessions({ fs, grokHome, cwd, overrides });
+    expect(out[0].displayName).toBe("Renamed");
+  });
+
   it("falls back to date when summary is empty and no customName", () => {
     const fs = buildFs({
       [dir]: { isDir: true },
