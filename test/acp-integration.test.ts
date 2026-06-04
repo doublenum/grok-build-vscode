@@ -140,6 +140,12 @@ describe("ACP integration (real subprocess, fake CLI)", () => {
     expect(meta).toMatchObject({ totalTokens: 10 });
   });
 
+  it("session/new maps model _meta.agentType + totalContextTokens into availableModels", async () => {
+    expect(client.availableModels).toEqual([
+      { modelId: "fake-model", name: "Fake", description: undefined, totalContextTokens: 512000, agentType: "grok-build-plan" },
+    ]);
+  });
+
   it("startup: a valid default effort is forwarded as --reasoning-effort before stdio", async () => {
     const logs: string[] = [];
     const effortClient = new AcpClient({

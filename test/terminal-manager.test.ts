@@ -1,6 +1,9 @@
 import { describe, it, expect } from "vitest";
 import * as os from "node:os";
-import { TerminalManager, resolveExitCode, buildKillPlan } from "../src/terminal-manager";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { execSync } from "node:child_process";
+import { TerminalManager, resolveExitCode, buildKillPlan, augmentCommandWithGrokCoAuthor, GROK_BUILD_CO_AUTHOR } from "../src/terminal-manager";
 
 // Use `node -e` everywhere so tests are deterministic on Windows, macOS, and Linux.
 // Quoting strategy: single-quote the outer node script, escape inner single quotes if any.
@@ -170,5 +173,78 @@ describe("buildKillPlan", () => {
   it("uses a SIGTERM signal on POSIX", () => {
     const plan = buildKillPlan(1234, "linux");
     expect(plan).toEqual({ kind: "signal", signal: "SIGTERM" });
+  });
+});
+
+describe("augmentCommandWithGrokCoAuthor", () => {
+  it("leaves non-git-commit commands untouched", () => {
+    const cmd = "git status && git push origin main";
+    expect(augmentCommandWithGrokCoAuthor(cmd)).toBe(cmd);
+  });
+
+  it("wraps direct git commit and injects --trailer", () => {
+    const cmd = "git commit -m 'feat: add thing'";
+    const out = augmentCommandWithGrokCoAuthor(cmd);
+    expect(out).not.toBe(cmd);
+    expect(out).toContain("git() {");
+    expect(out).toContain('--trailer "Co-authored-by: Grok Build <noreply@grok.x.ai>"');
+    expect(out).toContain(cmd); // original tail is preserved
+  });
+
+  it("wraps compound commands containing git commit (&&, ;)", () => {
+    const cmd = "git add -A && git commit -m 'fix: bar' && git push";
+    const out = augmentCommandWithGrokCoAuthor(cmd);
+    expect(out).toContain("git() {");
+    expect(out).toContain('--trailer "Co-authored-by: Grok Build <noreply@grok.x.ai>"');
+    expect(out.endsWith(cmd)).toBe(true);
+  });
+
+  it("still wraps even if message will be checked at runtime; guard prevents double-trailer at exec time", () => {
+    const cmd = "git commit -m 'feat: x\n\nCo-authored-by: Grok Build <noreply@grok.x.ai>'";
+    const out = augmentCommandWithGrokCoAuthor(cmd);
+    // wrapper is still prepended (runtime guard inside will see the trailer in "$*" and skip --trailer)
+    expect(out).toContain("git() {");
+    // The constructed command string contains the trailer text twice (once in wrapper, once in original -m),
+    // but importantly only *one* `--trailer` flag is injected (the runtime guard suppresses a second).
+    const trailerFlagCount = (out.match(/--trailer/g) || []).length;
+    expect(trailerFlagCount).toBe(1);
+    const grokMentions = (out.match(/Grok Build <noreply@grok.x.ai>/g) || []).length;
+    expect(grokMentions).toBe(2);
+  });
+});
+
+describe("Grok Build co-author trailer (integration)", () => {
+  it("agent-driven git commit via TerminalManager receives the co-author trailer", async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "grok-coauthor-test-"));
+    try {
+      // Init a clean git repo in tmp
+      execSync("git init -q", { cwd: tmp });
+      execSync("git config user.email test@example.com", { cwd: tmp });
+      execSync("git config user.name Test", { cwd: tmp });
+
+      // Make a commit so HEAD exists, then a change to commit via the manager
+      fs.writeFileSync(path.join(tmp, "README.md"), "init\n");
+      execSync("git add README.md && git commit -q -m 'init'", { cwd: tmp });
+
+      fs.writeFileSync(path.join(tmp, "change.txt"), "hello from grok\n");
+      execSync("git add change.txt", { cwd: tmp });
+
+      const m = new TerminalManager();
+      // Issue a commit exactly as an agent would (the manager will augment the command)
+      const commitCmd = `cd "${tmp}" && git commit -m "feat: test co-author injection from grok build"`;
+      const { terminalId } = m.create({ command: commitCmd });
+      const { exitCode } = await m.waitForExit(terminalId);
+      expect(exitCode).toBe(0);
+
+      // Verify the trailer is present in the commit message
+      const log = execSync(`git -C "${tmp}" log -1 --format=%B`, { encoding: "utf8" });
+      expect(log).toContain("feat: test co-author injection from grok build");
+      expect(log).toContain(GROK_BUILD_CO_AUTHOR);
+      expect(log).toContain("Co-authored-by: Grok Build");
+
+      m.release(terminalId);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });

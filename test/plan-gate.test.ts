@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  agentSupportsPlan,
   isInsideWorkspace,
   isMutatingKind,
   isReadOnlyCommand,
@@ -262,5 +263,21 @@ describe("isPlanFileWrite", () => {
   it("does not match an ordinary workspace file", () => {
     expect(isPlanFileWrite(WIN_WORKSPACE_WRITE)).toBe(false);
     expect(isPlanFileWrite("/home/u/proj/plan.md")).toBe(false);
+  });
+});
+
+describe("agentSupportsPlan", () => {
+  it("treats the grok-build-plan agent as plan-capable", () => {
+    expect(agentSupportsPlan("grok-build-plan")).toBe(true);
+  });
+  it("treats the cursor agent (Composer 2.5) as non-plan", () => {
+    // The CLI bounces set_mode:"plan" back to "default" on this agent.
+    expect(agentSupportsPlan("cursor")).toBe(false);
+    expect(agentSupportsPlan("CURSOR")).toBe(false);
+  });
+  it("assumes unknown / missing agents are plan-capable (don't block on absent data)", () => {
+    expect(agentSupportsPlan(undefined)).toBe(true);
+    expect(agentSupportsPlan("")).toBe(true);
+    expect(agentSupportsPlan("some-future-agent")).toBe(true);
   });
 });

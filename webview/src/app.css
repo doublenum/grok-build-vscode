@@ -1023,6 +1023,11 @@ body {
 
 .effort-dot:hover { opacity: 1; }
 
+/* Composer (Cursor agent) ignores --reasoning-effort — render the dots inert. */
+.effort-dots.unsupported { opacity: 0.4; }
+.effort-dots.unsupported .effort-dot { cursor: default; }
+.effort-dots.unsupported .effort-dot:hover { opacity: 0.65; }
+
 /* mode popover: icon + (label + description) */
 .mode-item { align-items: flex-start; gap: 9px; padding: 8px 10px; }
 .mode-item-icon { margin-top: 1px; flex-shrink: 0; color: var(--vscode-foreground); }

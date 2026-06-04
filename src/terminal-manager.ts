@@ -2,6 +2,34 @@ import { ChildProcess, execFile, spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 import * as os from "node:os";
 
+/**
+ * Co-author trailer appended to commits made via agent-driven terminal commands.
+ * Mirrors the Claude Code behavior shown in PRs where the model/extension that
+ * fully handled the work is credited via a standard Git trailer (GitHub surfaces
+ * it as "Co-authored-by" on commits and PRs).
+ */
+export const GROK_BUILD_CO_AUTHOR = "Grok Build <noreply@grok.x.ai>";
+
+/**
+ * If the shell command string contains a top-level `git commit` invocation,
+ * wrap it so the commit receives the Grok Build co-author trailer.
+ *
+ * The wrapper overrides `git` only for this shell invocation. Detection of
+ * pre-existing trailer (in -m body or prior --trailer) happens at runtime
+ * inside the shell function, so heredoc/script-literal content containing the
+ * words "git commit" is never mutated.
+ */
+export function augmentCommandWithGrokCoAuthor(original: string): string {
+  if (!/\bgit\s+commit\b/.test(original)) return original;
+  const trailer = `Co-authored-by: ${GROK_BUILD_CO_AUTHOR}`;
+  // Compact POSIX-sh compatible wrapper. Uses "$*" (space-joined args) so
+  // trailers embedded inside -m "..." values are visible to the guard.
+  const wrapper =
+    `git() { if [ "$1" = "commit" ] && ! printf '%s\n' "$*" | grep -q 'Grok Build'; then ` +
+    `shift; command git commit --trailer "${trailer}" "$@"; return $?; fi; command git "$@"; }; `;
+  return wrapper + original;
+}
+
 export interface TerminalCreateParams {
   command: string; // single shell-quoted string per ACP
   env?: Array<{ name: string; value: string }>;
@@ -78,7 +106,8 @@ export class TerminalManager {
     const env = this.envFromParams(params.env);
     const cwd = params.cwd || process.cwd();
     const byteLimit = params.outputByteLimit ?? DEFAULT_BYTE_LIMIT;
-    const proc = spawn(params.command, { cwd, env, shell: true });
+    const command = augmentCommandWithGrokCoAuthor(params.command);
+    const proc = spawn(command, { cwd, env, shell: true });
 
     const entry: TerminalEntry = {
       proc,

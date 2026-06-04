@@ -139,10 +139,18 @@ function toolKey(call: any): string {
   return toolName(call).toLowerCase();
 }
 
+// grok's write/edit family (write_file, edit, str_replace, multiedit…). Shared by
+// the heading/label logic and by groupItems, which pulls these out of the generic
+// tool group so each file change renders as its own diff card.
+const EDIT_TOOL_RE = /^(write|write_file|file_write|edit|edit_file|search_replace|searchreplace|str_replace|multiedit)$/;
+function isEditCall(call: any): boolean {
+  return call?.kind === 'edit' || EDIT_TOOL_RE.test(toolKey(call));
+}
+
 function toolHeading(call: any): string {
   const n = toolKey(call);
   if (call?.kind === 'read' || /^(read|read_file|file_read|list_dir|list_directory|listdir|ls)$/.test(n)) return 'Read';
-  if (call?.kind === 'edit' || /^(write|write_file|file_write|edit|edit_file|search_replace|searchreplace|str_replace|multiedit)$/.test(n)) return 'Edit';
+  if (isEditCall(call)) return 'Edit';
   if (call?.kind === 'execute' || /^(bash|execute|run_command|run_terminal_command|shell|run_bash)$/.test(n)) return 'Bash';
   if (/^(web_search|search_web|websearch)$/.test(n)) return 'Search';
   if (/^(web_fetch|webfetch)$/.test(n)) return 'Fetch';
@@ -182,12 +190,26 @@ function toolDesc(call: any): string {
 type TodoStatus = 'completed' | 'in_progress' | 'pending' | 'cancelled';
 interface TodoEntry { id?: string; content: string; status: TodoStatus }
 
-// grok's TodoWrite tool. The call input is { variant:"TodoWrite", merge, todos:[…] }
-// and its output echoes the merged list under TodosUpdated.todos. We prefer the
-// output (authoritative merged state) and fall back to the input.
-function isTodoCall(call: any): boolean {
+// Shared extractor so isTodoCall and rendering agree on what counts as a
+// TodoWrite (input variant/todos, or output TodosUpdated, or name match).
+function getTodoList(call: any): TodoEntry[] | null {
+  // Output side (authoritative merged state from the tool) may carry the list
+  // under TodosUpdated.todos (or bare todos). Fall back to input.
+  const out = call?.rawOutput ?? call?.output;
+  const fromOut = out?.TodosUpdated?.todos ?? out?.todos;
+  if (Array.isArray(fromOut)) return fromOut as TodoEntry[];
   const r = rawInput(call);
-  if (r?.variant === 'TodoWrite' || Array.isArray(r?.todos)) return true;
+  if (Array.isArray(r?.todos)) return r.todos as TodoEntry[];
+  return null;
+}
+
+// Treat anything that carries TodoWrite data (by variant, explicit todos list,
+// or output payload) or whose tool name mentions "todo" as a todo list for
+// special rendering + last-revision collapsing.
+function isTodoCall(call: any): boolean {
+  if (getTodoList(call) !== null) return true;
+  const r = rawInput(call);
+  if (r?.variant === 'TodoWrite') return true;
   const n = toolName(call).toLowerCase();
   return /todo/.test(n);
 }
@@ -204,13 +226,7 @@ function isSubagentCall(call: any): boolean {
 }
 
 function extractTodos(call: any): TodoEntry[] {
-  // Output side: content array may carry the merged TodosUpdated payload.
-  const out = call?.rawOutput ?? call?.output;
-  const fromOut = out?.TodosUpdated?.todos ?? out?.todos;
-  if (Array.isArray(fromOut)) return fromOut as TodoEntry[];
-  const r = rawInput(call);
-  if (Array.isArray(r?.todos)) return r.todos as TodoEntry[];
-  return [];
+  return getTodoList(call) ?? [];
 }
 
 // Present-tense label for the in-progress tool-group header (ported from
@@ -227,7 +243,7 @@ function inProgressLabel(call: any): string {
   if (/^(web_search|search_web|websearch)$/.test(name)) return 'Searching web';
   if (/^(web_fetch|webfetch)$/.test(name)) return 'Fetching page';
   if (/^(grep|ripgrep|search_files)$/.test(name)) return 'Searching code';
-  if (/^(write|write_file|file_write|edit|edit_file|search_replace|searchreplace|str_replace|multiedit)$/.test(name) || call?.kind === 'edit') return fp ? `Editing ${prettyPath(fp)}` : 'Editing file';
+  if (isEditCall(call)) return fp ? `Editing ${prettyPath(fp)}` : 'Editing file';
   if (/^(bash|execute|run_command|run_terminal_command|shell|run_bash)$/.test(name) || call?.kind === 'execute') return 'Running command';
   const v = rawInput(call).variant;
   if (typeof v === 'string' && v) return `Running ${v}`;
@@ -1094,16 +1110,18 @@ type RenderEntry =
   | { kind: 'toolGroup'; tools: Extract<Item, { kind: 'tool' }>[] }
   | { kind: 'todo'; tool: Extract<Item, { kind: 'tool' }> }
   | { kind: 'subagent'; tool: Extract<Item, { kind: 'tool' }> }
+  | { kind: 'edit'; tool: Extract<Item, { kind: 'tool' }> }
   | { kind: 'single'; item: Exclude<Item, { kind: 'tool' }> };
 
 const isGroupableTool = (it: Item): it is Extract<Item, { kind: 'tool' }> =>
-  it.kind === 'tool' && !isTodoCall(it.raw) && !isSubagentCall(it.raw);
+  it.kind === 'tool' && !isTodoCall(it.raw) && !isSubagentCall(it.raw) && !isEditCall(it.raw);
 
 function groupItems(items: Item[]): RenderEntry[] {
   const out: RenderEntry[] = [];
-  // grok emits a fresh TodoWrite call (new id) on every revision, each carrying
-  // the full current list. Render only the latest so the checklist updates in
-  // place instead of stacking a new card per revision.
+  // grok emits a fresh TodoWrite call (new id) on every revision (or new list),
+  // each carrying the full current list (via input or output). Render only the
+  // latest (non-superseded) so the checklist updates in place instead of
+  // stacking or leaving old completed lists visible after a new list starts.
   let lastTodo = -1;
   for (let i = 0; i < items.length; i++) {
     if (items[i].kind === 'tool' && isTodoCall((items[i] as Extract<Item, { kind: 'tool' }>).raw)) lastTodo = i;
@@ -1118,6 +1136,11 @@ function groupItems(items: Item[]): RenderEntry[] {
     // Subagent delegations get their own card too, not folded into a tool group.
     if (it.kind === 'tool' && isSubagentCall(it.raw)) {
       out.push({ kind: 'subagent', tool: it });
+      continue;
+    }
+    // Edits surface as standalone diff cards, never buried inside a "16 tools" batch.
+    if (it.kind === 'tool' && isEditCall(it.raw)) {
+      out.push({ kind: 'edit', tool: it });
       continue;
     }
     if (isGroupableTool(it)) {
@@ -1168,7 +1191,7 @@ function App() {
 
   // model / effort / token-usage state (fed by the host: session, modelChanged,
   // initialState, agentEnd meta)
-  const [models, setModels] = useState<{ modelId: string; name?: string; totalContextTokens?: number }[]>([]);
+  const [models, setModels] = useState<{ modelId: string; name?: string; totalContextTokens?: number; agentType?: string }[]>([]);
   const [currentModelId, setCurrentModelId] = useState<string | null>(null);
   const [effort, setEffort] = useState('');
   const [contextWindow, setContextWindow] = useState(200000);
@@ -1184,6 +1207,11 @@ function App() {
   const [mentionActive, setMentionActive] = useState(0);
   const [processing, setProcessing] = useState(false);
   const planQueueRef = useRef<{ text: string; verdict?: string; planPath?: string; planName?: string }[]>([]);
+  // Messages typed while the session is still locked (initializing on new session
+  // or tab) are held here. We flush them via the idle effect without ever putting
+  // them in the visible `queued` list, so the queued bar never appears for the
+  // first prompt in a fresh session.
+  const startupQueueRef = useRef<QueuedMsg[]>([]);
   // Which consecutive-tool groups are expanded, keyed by the group's first item id.
   const [openGroups, setOpenGroups] = useState<Set<string>>(new Set());
   const toggleGroup = (id: string) => setOpenGroups((prev) => {
@@ -1230,6 +1258,7 @@ function App() {
           dispatch({ t: 'reset' });
           setBusy(false); setLocked(false); setProcessing(false); setQueued([]);
           setTitleOverride(null);
+          startupQueueRef.current = [];
           planQueueRef.current = [];
           break;
         case 'agentReset':
@@ -1280,10 +1309,14 @@ function App() {
         case 'agentError':
           dispatch({ t: 'error', text: msg.text || 'Something went wrong' });
           setBusy(false); setLocked(false); setProcessing(false);
+          setQueued([]);
+          startupQueueRef.current = [];
           break;
         case 'exit':
           dispatch({ t: 'error', text: `Grok exited (code ${msg.code}). Start a new session to restart.` });
           setBusy(false); setLocked(false); setProcessing(false);
+          setQueued([]);
+          startupQueueRef.current = [];
           break;
         case 'setBusy':
           setBusy(!!msg.value);
@@ -1453,6 +1486,13 @@ function App() {
     // Busy (a turn is running) or locked (session still starting) → queue it and
     // let the flush effect send it once the surface is free. Otherwise send now.
     if (busy || locked) {
+      if (locked) {
+        // Hold in a non-visual startup buffer (plus render guard below) so the
+        // queued UI does not appear as a result of text entered into a new
+        // session (while the init lock is active).
+        startupQueueRef.current = [...startupQueueRef.current, msg];
+        return;
+      }
       setQueued((q) => [...q, msg]);
       return;
     }
@@ -1462,7 +1502,18 @@ function App() {
   // Flush the next queued message as soon as the surface goes idle. dispatchSend
   // sets busy=true again, so messages drain one-per-turn rather than all at once.
   useEffect(() => {
-    if (busy || locked || queued.length === 0) return;
+    if (busy || locked) return;
+    // Drain startup-buffered messages (typed during new-session lock) first.
+    // These were never added to the visual `queued` state, and the render also
+    // guards with `!locked`, so the queued bar does not appear as a result of
+    // text entered into a new session.
+    if (startupQueueRef.current.length > 0) {
+      const [next, ...rest] = startupQueueRef.current;
+      startupQueueRef.current = rest;
+      dispatchSend(next);
+      return;
+    }
+    if (queued.length === 0) return;
     const [next, ...rest] = queued;
     setQueued(rest);
     dispatchSend(next);
@@ -1534,6 +1585,7 @@ function App() {
   const newChat = () => {
     dispatch({ t: 'reset' });
     setBusy(false); setLocked(false); setQueued([]); setTitleOverride(null);
+    startupQueueRef.current = [];
     vscode.postMessage({ type: 'newSession' });
   };
 
@@ -1591,6 +1643,12 @@ function App() {
 
   const currentModelLabel = currentModelId || 'grok-build';
   const effortIdx = EFFORT_LEVELS.indexOf(effort as typeof EFFORT_LEVELS[number]);
+  // --reasoning-effort only bites on grok's own agents. The Cursor-routed agent
+  // (Composer) ignores it entirely — reasoningTokens stays 0 at every level
+  // (verified: research/effort-behavior-probe*.cjs), mirroring NON_PLAN_AGENTS in
+  // src/plan-gate.ts. Keep the control honest: don't offer a live dial that does nothing.
+  const currentAgentType = models.find((m) => m.modelId === currentModelId)?.agentType;
+  const effortSupported = (currentAgentType ?? '').toLowerCase() !== 'cursor';
   const modeMeta = MODE_META[mode] || MODE_META.agent;   // never crash on an unknown mode id
 
   // Token-usage donut geometry (r=5 ring, like the sidebar's updateDonut).
@@ -1751,6 +1809,16 @@ function App() {
                   </div>
                 );
               }
+              if (entry.kind === 'edit') {
+                return (
+                  <div className="turn" key={entry.tool.id}>
+                    <div className="turn-gutter"><span className="turn-dot tone-tool" /></div>
+                    <div className="turn-body">
+                      <ToolRow item={entry.tool} onToggle={() => dispatch({ t: 'toggle', id: entry.tool.id })} />
+                    </div>
+                  </div>
+                );
+              }
               const it = entry.item;
               if (it.kind === 'user') {
                 return (
@@ -1864,7 +1932,7 @@ function App() {
           </div>
         )}
 
-        {queued.length > 0 && (
+        {queued.length > 0 && !locked && (
           <div className="queued">
             {queued.map((q, i) => (
               <div className="queued-item" key={i}>
@@ -2007,14 +2075,18 @@ function App() {
                           <span className="model-name-label">{truncate(currentModelLabel, 16)}</span>
                           <ChevronRight size={12} aria-hidden="true" />
                         </button>
-                        <span className="effort-dots">
+                        <span
+                          className={`effort-dots${effortSupported ? '' : ' unsupported'}`}
+                          title={effortSupported ? undefined : `${currentModelLabel} ignores reasoning effort`}
+                        >
                           {EFFORT_LEVELS.map((id, i) => (
                             <button
                               key={id}
-                              className={`effort-dot${i <= effortIdx ? ' active' : ''}`}
-                              title={EFFORT_TOOLTIPS[id]}
+                              className={`effort-dot${i <= effortIdx && effortSupported ? ' active' : ''}`}
+                              title={effortSupported ? EFFORT_TOOLTIPS[id] : `Reasoning effort isn't supported by ${currentModelLabel}`}
                               aria-label={`Reasoning effort: ${id}`}
-                              onClick={(e) => { e.stopPropagation(); pickEffort(id); }}
+                              disabled={!effortSupported}
+                              onClick={(e) => { e.stopPropagation(); if (effortSupported) pickEffort(id); }}
                             />
                           ))}
                         </span>

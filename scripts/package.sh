@@ -43,7 +43,6 @@ if $LOCAL_MODE; then
 
     # Backup files we will patch
     cp package.json package.json.bak
-    cp src/grok-primer.ts src/grok-primer.ts.bak
     cp src/extension.ts src/extension.ts.bak
     cp src/sidebar.ts src/sidebar.ts.bak
     cp webview/src/App.tsx webview/src/App.tsx.bak
@@ -51,7 +50,6 @@ if $LOCAL_MODE; then
     # Ensure restoration even on error
     trap '
       [ -f package.json.bak ] && mv package.json.bak package.json
-      [ -f src/grok-primer.ts.bak ] && mv src/grok-primer.ts.bak src/grok-primer.ts
       [ -f src/extension.ts.bak ] && mv src/extension.ts.bak src/extension.ts
       [ -f src/sidebar.ts.bak ] && mv src/sidebar.ts.bak src/sidebar.ts
       [ -f webview/src/App.tsx.bak ] && mv webview/src/App.tsx.bak webview/src/App.tsx
@@ -175,20 +173,6 @@ PATCHEOF
     node /tmp/grok-local-ts-patch.js
     rm -f /tmp/grok-local-ts-patch.js
 
-    # Patch the primer
-    cat > /tmp/grok-local-primer-patch.js << 'PATCHEOF'
-      const fs = require("fs");
-      let text = fs.readFileSync("src/grok-primer.ts", "utf8");
-      text = text.replace(
-        /This is a Grok Build extension for VS Code developed by Paweł Huryn\. The extension is a thin wrapper of Grok Build CLI over ACP with a custom Plan Mode implementation\. For more \(docs, version history, open source repo, issues\): https:\/\/marketplace\.visualstudio\.com\/items\?itemName=PawelHuryn\.grok-vscode-phuryn/,
-        "LOCAL DEV BUILD of Grok Build VS Code extension (completely separate identity from the published version)."
-      );
-      fs.writeFileSync("src/grok-primer.ts", text);
-PATCHEOF
-
-    node /tmp/grok-local-primer-patch.js
-    rm -f /tmp/grok-local-primer-patch.js
-
     echo "==> Rebuilding with local namespace (grok-local.*)"
     npm run build:webview
     npx tsc -p . --skipLibCheck
@@ -196,8 +180,29 @@ PATCHEOF
     OUT_FILE="grok-build-local.vsix"
 else
     echo "==> Building webview (React) + TypeScript"
+
+    # Patch primer for published build (source now carries the LOCAL DEV variant
+    # so that plain "Run Extension (fast)" dev sessions and --local builds see
+    # the dev-appropriate hidden primer; published vsix must get the author/link text).
+    cp src/grok-primer.ts src/grok-primer.ts.pub.bak 2>/dev/null || true
+    cat > /tmp/grok-published-primer-patch.js << 'PATCHEOF'
+      const fs = require("fs");
+      let text = fs.readFileSync("src/grok-primer.ts", "utf8");
+      text = text.replace(
+        /LOCAL DEV BUILD of Grok Build VS Code extension \(completely separate identity from the published version\)\./,
+        "This is a Grok Build extension for VS Code developed by Paweł Huryn. The extension is a thin wrapper of Grok Build CLI over ACP with a custom Plan Mode implementation. For more (docs, version history, open source repo, issues): https://marketplace.visualstudio.com/items?itemName=PawelHuryn.grok-vscode-phuryn"
+      );
+      fs.writeFileSync("src/grok-primer.ts", text);
+PATCHEOF
+    node /tmp/grok-published-primer-patch.js
+    rm -f /tmp/grok-published-primer-patch.js
+
     npm run build:webview
     npx tsc -p . --skipLibCheck
+
+    # Restore primer so tree stays clean (source of truth for dev is the LOCAL variant)
+    [ -f src/grok-primer.ts.pub.bak ] && mv src/grok-primer.ts.pub.bak src/grok-primer.ts || true
+
     OUT_FILE="grok-build.vsix"
 fi
 

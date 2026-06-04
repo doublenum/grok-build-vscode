@@ -132,6 +132,22 @@ export function planModeToolSignal(call: any): "enter" | "exit" | null {
   return null;
 }
 
+/**
+ * True if a rejected `session/set_model` failed because the target model needs a
+ * different agent than the one this session has locked in. The CLI rejects with
+ * a structured error (`data.code === "MODEL_SWITCH_INCOMPATIBLE_AGENT"`,
+ * `data.suggestion === "start_new_session"`) once a prompt has activated the
+ * agent; before the first prompt the switch succeeds. We match the structured
+ * code first and fall back to the message text for older/looser builds.
+ */
+export function isIncompatibleAgentError(err: any): boolean {
+  if (!err || typeof err !== "object") return false;
+  const code = err.data?.code ?? err.error?.data?.code;
+  if (code === "MODEL_SWITCH_INCOMPATIBLE_AGENT") return true;
+  const msg = typeof err.message === "string" ? err.message : "";
+  return /requires agent .* but the active agent/i.test(msg);
+}
+
 // grok's ask_user_question elicitation. The method name varies by CLI build, so
 // we recognize the request by shape: params carry a `questions` array (each with
 // a `question` string + `options[]`). Returns the normalized question(s) or null.

@@ -74,6 +74,24 @@ export function isInsideWorkspace(target: string, root: string): boolean {
   return t === r || t.startsWith(r + "/");
 }
 
+/**
+ * CLI agents that silently bounce `set_mode:"plan"` back to `"default"` because
+ * they have no plan mode. Verified against grok 0.2.22 (research/model-agent-probe*.cjs):
+ * the `cursor` agent (Composer 2.5) emits `current_mode_update:"plan"` then
+ * immediately reverts to `"default"`, while `grok-build-plan` stays in plan.
+ *
+ * The CLI exposes no plan-capability flag — only `_meta.agentType` — so we key
+ * off the agent. Unknown agents are assumed plan-capable (don't block on data we
+ * don't have); only agents proven to lack plan are listed here.
+ */
+const NON_PLAN_AGENTS = new Set(["cursor"]);
+
+/** True if a model on `agentType` can actually enter (and hold) plan mode. */
+export function agentSupportsPlan(agentType: string | undefined): boolean {
+  if (!agentType) return true; // unknown agent → assume capable, don't block
+  return !NON_PLAN_AGENTS.has(agentType.toLowerCase());
+}
+
 /** Tool-call `kind`s that mutate state and must be rejected while planning. */
 const MUTATING_KINDS = new Set(["edit", "execute", "delete", "move", "write"]);
 

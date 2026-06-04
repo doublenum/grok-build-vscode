@@ -2,12 +2,12 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![VS Code](https://img.shields.io/badge/VS%20Code-Extension-007ACC?logo=visualstudiocode&logoColor=white)](https://code.visualstudio.com) [![Grok Build](https://img.shields.io/badge/xAI-Grok%20Build-000000)](https://x.ai) [![The Product Compass](https://img.shields.io/badge/The%20Product%20Compass-productcompass.pm-FF6B35)](https://www.productcompass.pm)
 
-A thin VS Code sidebar client for xAI's Grok Build CLI. It spawns `grok agent stdio` as a headless child process and drives it over the [Agent Client Protocol (ACP)](https://agentclientprotocol.com) — all session state, MCP servers, subagents, memory, and tool execution stay inside that CLI process. Kill the extension and the `grok` child dies with it; kill `grok` and the extension shows an error and lets you start a fresh session. **Not a terminal launcher and not a re-implementation.**
+A thin client for xAI's Grok Build CLI. It drives `grok agent stdio` over the [Agent Client Protocol (ACP)](https://agentclientprotocol.com) from VS Code surfaces (sidebar or full editor tabs). All session state, MCP servers, subagents, memory, and tool execution stay inside the CLI process — the extension is only the surfaces, mandatory ACP handlers, and client-side policy (plan-mode gate, YOLO). Each surface owns an independent session. Kill the extension and the `grok` child dies with it. **Not a terminal launcher and not a re-implementation.**
 
 Works with SuperGrok Heavy subscription or xAI API key (standard Grok). 
 **Not affiliated with xAI.**
 
-![Grok Build in the VS Code sidebar](docs/screenshots/v1.2.0.png)
+![Grok Build in the VS Code sidebar (React webview)](docs/screenshots/v1.2.0.png)
 
 ![Grok Build alongside VS Code](docs/screenshots/v1.2.0_vscode.png)
 
@@ -15,15 +15,18 @@ Works with SuperGrok Heavy subscription or xAI API key (standard Grok).
 
 ## Why an extension, not the CLI?
 
+The CLI is the brain (history, memory, MCP servers, subagents, planning, tool execution). The extension exists only to give you **VS Code-native surfaces** and two client-side policies the protocol doesn't fully expose.
+
+- **Full editor tabs** — "Grok: Open in Editor Tab" (also in the gear menu) opens the chat in a movable, resizable editor group exactly like Claude Code. Sidebar and every tab are independent sessions (separate `GrokSidebar` + ACP client each). The React webview UI is shared for visual consistency.
 - **VS Code diff editor for proposed edits** — click "open diff →" on a permission card to see the exact change before approving
 - **Active editor and selection as first-class context** — chips render as `@/path/to/file` references so the CLI reads the live file, not a paste-frozen copy
 - **Permission cards** with **Allow always / Allow once / Reject** instead of `[y/N]` terminal prompts
-- **Session history** — clock icon in the top bar lists past sessions (saved by the CLI in `~/.grok/sessions/`); resume, rename, or delete any of them
-- **Upload from computer** — `+` button in the bottom toolbar opens a file picker; picked files are added as `@path` chips (no contents injected)
-- **Webview-native streaming** — a "Thinking..." line that resolves to "Thought for *N*s"; click it to expand the full reasoning trace, plus grouped tool-call rows
-- **Slash autocomplete sourced live from the CLI** via `available_commands_update` — reflects exactly what your installed version supports
+- **Client-side Plan mode enforcement** — the extension blocks workspace writes and non-allowlisted commands until you approve (because the CLI's `exit_plan_mode` response is currently unreliable). Approve/Reject/Cancel with optional comment; the verdict is forwarded in the next user message.
 - **YOLO mode toggled in-process** — no CLI restart, the session is untouched
-- **Side-by-side with other AI tools** — drag the icon to the secondary side bar to sit next to Copilot Chat / Claude Code
+- **Model picker that adapts to each agent** — switch between **Grok Build** and Cursor's **Composer 2.5**; the extension keeps the Plan-mode and reasoning-effort controls honest per model (see Known limits), since the two run on different CLI agents
+- **Session history** — clock icon lists past sessions saved by the CLI in `~/.grok/sessions/`; resume, rename, or delete
+- **Slash autocomplete sourced live from the CLI** via `available_commands_update`
+- **Side-by-side with other AI tools** — drag to the secondary side bar, or live in full editor tabs
 
 Trade-off: this is a UI shell, not a replacement. Install the `grok` CLI first; the extension is useless without it.
 
@@ -86,7 +89,7 @@ Reload VS Code (**Ctrl+Shift+P → Developer: Reload Window**) and click the Gro
 
 ### Thin client over ACP
 
-The extension speaks JSON-RPC over `grok agent stdio`'s stdin/stdout. It implements every mandatory server→client handler (`fs/read_text_file`, `fs/write_text_file`, `terminal/{create,output,wait_for_exit,kill,release}`) — missing any of them crashes the agent mid-session.
+The extension is deliberately thin. It speaks JSON-RPC over `grok agent stdio`'s stdin/stdout and implements every mandatory server→client handler. The CLI owns the agent, the plan, the memory, the MCP servers, and the tool execution. The extension only supplies VS Code surfaces (sidebar + editor tabs) and two client-side policies: the Plan mode gate and YOLO auto-approval.
 
 ### Where state lives
 
@@ -142,26 +145,22 @@ When the panel opens (or you click **+** for a new session):
 4. If `grok.defaultEffort` is set, forward it as `--reasoning-effort <value>` before the `stdio` subcommand (values match grok's accepted set: `none`/`minimal`/`low`/`medium`/`high`/`xhigh`).
 5. Stream `session/update` notifications (messages, thoughts, tool calls, permission requests) back to the chat.
 
-### Module map
+### Module map (core)
 
 | File | Role |
 |---|---|
 | [src/extension.ts](src/extension.ts) | Entry point — registers commands, keybindings, output channel |
-| [src/sidebar.ts](src/sidebar.ts) | Webview provider, message routing, fs handlers, diff preview |
-| [src/acp.ts](src/acp.ts) | ACP client — spawns CLI, manages session lifecycle, emits events |
-| [src/acp-dispatch.ts](src/acp-dispatch.ts) | Pure protocol helpers — line parsing, update routing, response builders |
-| [src/cli-locator.ts](src/cli-locator.ts) | Locate `grok` binary; cross-platform |
-| [src/terminal-manager.ts](src/terminal-manager.ts) | Headless shells for the agent's `terminal/*` calls |
-| [src/chips.ts](src/chips.ts) | File-chip CRUD (pure) |
-| [src/prompt-builder.ts](src/prompt-builder.ts) | Chip → prompt-string with `@path` refs and fenced blocks |
-| [src/slash-filter.ts](src/slash-filter.ts) | Slash-command autocomplete filter |
-| [src/sessions.ts](src/sessions.ts) | Disk-driven session listing/delete + customName overrides (pure) |
-| [media/chat.{js,css}](media/) | Webview UI |
-| [media/webview-helpers.js](media/webview-helpers.js) | Pure webview helpers (file-ref detection, relative-time format); shared between webview and tests |
+| [src/sidebar.ts](src/sidebar.ts) | One independent controller + session per surface (sidebar or editor tab) |
+| [src/acp.ts](src/acp.ts) | ACP client — spawns CLI, manages session lifecycle |
+| [src/grok-primer.ts](src/grok-primer.ts) | Hidden v4 system prompt injected on every session start (explains plan verdict markers to the CLI) |
+| [src/plan-gate.ts](src/plan-gate.ts) | Client-side Plan mode enforcement (workspace-write block + read-only allowlist) |
+| Pure modules (`acp-dispatch`, `chips`, `prompt-builder`, `slash-filter`, `cli-locator`, `sessions`, `plan-restore`, `plan-review`, `file-ref`, `webview-helpers`) | No `vscode` import, no spawn — fully unit-testable under Vitest |
+
+The React webview (`webview/` + Vite) is the runtime UI for both sidebar and editor tabs (built to `out/webview`). Legacy `media/chat.{js,css}` powers only the DOM test harness.
 
 ### Design choices worth knowing
 
-- **Pure modules split for testability.** `acp-dispatch`, `chips`, `prompt-builder`, `slash-filter`, `cli-locator`, `sessions`, `webview-helpers` have no `vscode` import, no spawn, no network — they run under Vitest in a Node process. 94 tests in under two seconds.
+- **Pure modules split for testability.** `acp-dispatch`, `chips`, `prompt-builder`, `slash-filter`, `cli-locator`, `sessions`, `webview-helpers` (and the plan-gate / plan-restore logic) have no `vscode` import and no spawn — they run under Vitest in a plain Node process. This is why 256 fast, hermetic tests is the floor.
 - **YOLO is client-side only.** It's a single `autoApprove` flag in [src/sidebar.ts](src/sidebar.ts) — toggling Agent ↔ YOLO doesn't restart the CLI or even send a message. Whenever the CLI does raise a permission request, the extension just answers "allow always" automatically.
 - **Cross-platform without per-OS branches.** [src/terminal-manager.ts](src/terminal-manager.ts) uses `spawn(cmd, { shell: true })` so Node picks `cmd.exe` or `/bin/sh`. [src/cli-locator.ts](src/cli-locator.ts) prefers `HOME`/`USERPROFILE` env over `os.homedir()` so tests can override paths.
 - **Streaming is rAF-coalesced.** `agent_message_chunk` and `agent_thought_chunk` buffer into a raw string and re-render at most once per animation frame — keeps long responses smooth even under fast chunk rates.
@@ -216,7 +215,7 @@ grok mcp add playwright --command npx --args @playwright/mcp@latest
 
 Or edit the config files directly via gear → *Open global config* / *Open project config*. Click the new-session button in the sidebar to reload.
 
-![Markdown rendering, message actions, and YOLO mode with slash-command autocomplete](docs/screenshots/v1.1.0_more.png)
+![Markdown rendering, message actions, and YOLO mode](docs/screenshots/v1.1.0_more.png)
 
 ---
 
@@ -239,6 +238,7 @@ VS Code commands (not Grok slash commands). Open with **Ctrl+Shift+P** / **Cmd+S
 | Command | What it does |
 |---|---|
 | `Grok: Open` | Open the Grok sidebar |
+| `Grok: Open in Editor Tab` | Open Grok in a full movable editor panel (independent session) |
 | `Grok: New Session` | Start a fresh session |
 | `Grok: Pick Model` | Open the model picker |
 | `Grok: Toggle Plan / Agent Mode` | Open the mode picker (Agent / Plan / YOLO) |
@@ -260,22 +260,14 @@ VS Code commands (not Grok slash commands). Open with **Ctrl+Shift+P** / **Cmd+S
 
 ```bash
 npm install
-npm test         # 94 tests, <2s, vitest — no VS Code, no spawn (except terminal-manager)
-npm run package  # → grok-build.vsix
+npm run build:webview   # React UI (required for sidebar + editor tabs)
+npm test                # 256 tests (pure + DOM), ~2s, vitest — all grok-free
+npm run compile
 ```
 
-Pure tests are the floor — every change should keep 94 green. The split was made *specifically* so protocol bugs can be caught without spinning up VS Code:
+The split into pure modules (`acp-dispatch`, `chips`, `prompt-builder`, etc.) exists so protocol and policy logic can be tested without VS Code or the real CLI. 256 tests is the floor — every change must keep them green.
 
-- `test/acp-dispatch.test.ts` — wire format, `parseAcpLine`, `routeSessionUpdate`, response builders
-- `test/chips.test.ts` — file-chip CRUD
-- `test/prompt-builder.test.ts` — chip → prompt assembly
-- `test/slash-filter.test.ts` — autocomplete filter
-- `test/cli-locator.test.ts` — binary discovery
-- `test/sessions.test.ts` — disk-driven session listing, naming fallback, delete
-- `test/webview-helpers.test.ts` — file-ref detection, relative-time formatting
-- `test/terminal-manager.test.ts` — real `/bin/sh` spawn smoke
-
-See [TESTS.md](TESTS.md) for the full breakdown of what's covered vs deferred to a future `@vscode/test-electron` integration suite.
+See [TESTS.md](TESTS.md) for coverage details and the planned `@vscode/test-electron` integration suite. Smoke-test the packaged `.vsix` against a real `grok` binary for end-to-end flows.
 
 **Smoke testing against a real CLI:** install the VSIX into VS Code, open the panel, and run a few prompts that exercise reads, writes, terminal, and permission flow. The pure tests cover protocol regressions; smoke testing covers integration with the actual `grok` binary.
 
@@ -283,16 +275,20 @@ See [TESTS.md](TESTS.md) for the full breakdown of what's covered vs deferred to
 - Direct-to-`main`, no feature branches
 - Commits explain the *why*, not the *what*
 - No speculative abstractions; no comments restating well-named code
+- 256 tests is the floor
 
-**Publishing:** bump `package.json` version, `npm test`, `npm run publish` (requires `vsce login PawelHuryn` once with an Azure DevOps PAT).
+**Publishing:** user-initiated version bump in `package.json`, then `npm test && npm run publish`.
 
 ---
 
 ## Known limits
 
-- **Diff preview semantics.** The diff editor compares the proposed old and new text against each other, not against the file on disk at the moment of preview. The actual write happens via `fs/write_text_file` after approval. This is an ACP design constraint — `tool_call_update` carries the diff before the file is touched.
-- **No subagent inspector.** Subagent messages render inline as tool cards rather than in a dedicated panel.
-- **No worktree UI.** `Grok: New Worktree Session` is planned but not yet implemented.
+- **Plan mode verdict workaround.** The CLI's `exit_plan_mode` tool currently reports "approved" for any client reply. The extension therefore sends a hidden v4 primer on every session start and reads the user's real choice (`[Plan approved|rejected|cancelled]`) from the follow-up message. Client-side `plan-gate.ts` still enforces the write/command blocks until the user acts.
+- **Composer (Cursor agent) constraints.** Composer 2.5 runs on a different CLI agent than Grok Build, so: switching to or from it needs a fresh session (the CLI rejects a mid-session swap once a prompt has locked the agent in — the extension offers a one-click restart), and it supports neither Plan mode nor reasoning effort. Rather than show dead controls, the extension greys out the effort dots and offers a plan-capable restart instead of a fake Plan toggle. Verified against grok 0.2.22 (`research/model-agent-probe*.cjs`, `research/effort-behavior-probe*.cjs`).
+- **React test surface gap.** The runtime UI is the React webview (both sidebar and editor tabs). Most DOM tests still exercise the legacy `media/` harness. New React-specific coverage is thin (`tool-io.dom.test.ts`, `markdown.test.ts`).
+- **Diff preview semantics.** The diff editor compares the proposed old and new text against each other, not against the file on disk. The write happens later via `fs/write_text_file`.
+- **No subagent inspector.** Subagent messages render inline as tool cards.
+- **No worktree UI.** Planned but not yet implemented.
 
 ---
 

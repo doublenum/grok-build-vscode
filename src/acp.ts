@@ -37,6 +37,14 @@ export interface ModelInfo {
   name: string;
   description?: string;
   totalContextTokens?: number;
+  /**
+   * The CLI agent this model runs on (`_meta.agentType`, e.g. "grok-build-plan"
+   * or "cursor"). Models are bound to an agent: once a prompt locks the agent
+   * in, switching to a model on a different agent is rejected
+   * (MODEL_SWITCH_INCOMPATIBLE_AGENT), and plan mode only works on agents that
+   * support it. Used by the sidebar to gate model switches + plan mode.
+   */
+  agentType?: string;
 }
 
 export interface SlashCommand {
@@ -218,6 +226,7 @@ export class AcpClient extends EventEmitter {
       name: m.name,
       description: m.description,
       totalContextTokens: m._meta?.totalContextTokens,
+      agentType: m._meta?.agentType,
     }));
     this.emit("session", res);
 
@@ -241,12 +250,16 @@ export class AcpClient extends EventEmitter {
         name: m.name,
         description: m.description,
         totalContextTokens: m._meta?.totalContextTokens,
+        agentType: m._meta?.agentType,
       }));
     }
     this.emit("session", { sessionId, ...(res ?? {}) });
     this.emit("sessionLoaded", { sessionId });
     if (modelId && modelId !== this.currentModelId) {
-      await this.setModel(modelId);
+      // Best-effort: a resumed session whose agent is already locked may reject
+      // a remembered model on a different agent (MODEL_SWITCH_INCOMPATIBLE_AGENT).
+      // That must not fail the whole load — keep the session on its own model.
+      try { await this.setModel(modelId); } catch (e) { this.opts.log(`set_model on load: ${(e as any)?.message ?? e}`); }
     }
     return { sessionId };
   }

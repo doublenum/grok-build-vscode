@@ -13,9 +13,9 @@ import {
   toggleChip,
 } from "./chips";
 import { buildPrompt } from "./prompt-builder";
-import { planModeToolSignal } from "./acp-dispatch";
+import { planModeToolSignal, isIncompatibleAgentError } from "./acp-dispatch";
 import { parseFileRef, shouldReadFileInline } from "./file-ref";
-import { pickRejectOption, shouldRejectPermission } from "./plan-gate";
+import { agentSupportsPlan, pickRejectOption, shouldRejectPermission } from "./plan-gate";
 import { appendPlanEntry, decideRestoreState } from "./plan-restore";
 import { planReviewFileBaseName, sanitizePlanReviewFilePart } from "./plan-review";
 import { GROK_PRIMER } from "./grok-primer";
@@ -91,6 +91,11 @@ export class GrokSidebar implements vscode.WebviewViewProvider {
   private terminalManager = new TerminalManager();
   private autoApprove = false;
   private planActive = false;
+  // The model the user picked this run. Sticky across in-process session
+  // restarts (New Session, effort change, the agent-switch restart below) so a
+  // restart reopens on the chosen model instead of snapping back to the
+  // configured grok.defaultModel. Reset only when the extension reloads.
+  private selectedModel?: string;
   // Deferred post-turn action. The CLI's exit_plan_mode arrives *during* an
   // in-flight session/prompt, so we can't send a new prompt/set_mode from the
   // approval handler — we'd collide with the running turn. We stash the action
@@ -227,9 +232,53 @@ export class GrokSidebar implements vscode.WebviewViewProvider {
     const picked = await vscode.window.showQuickPick(items, {
       placeHolder: "Pick a Grok model",
     });
-    if (picked) {
-      await this.client.setModel(picked.modelId);
-      this.post({ type: "modelChanged", modelId: picked.modelId });
+    if (picked) await this.switchModel(picked.modelId);
+  }
+
+  /** The agent the active model runs on (e.g. "grok-build-plan", "cursor"). */
+  private currentAgentType(): string | undefined {
+    const c = this.client;
+    return c?.availableModels.find((m) => m.modelId === c.currentModelId)?.agentType;
+  }
+
+  /**
+   * Switch the live session's model. A model is bound to a CLI agent; once a
+   * prompt has locked the agent in, the CLI rejects a switch to a model on a
+   * different agent (MODEL_SWITCH_INCOMPATIBLE_AGENT) and asks us to start a new
+   * session. On that specific error we offer exactly that (a fresh session
+   * switches models cleanly); any other failure surfaces as-is. Success updates
+   * the webview via the client's `modelChanged` event.
+   */
+  private async switchModel(modelId: string): Promise<void> {
+    const client = this.client;
+    if (!client) return;
+    try {
+      await client.setModel(modelId);
+    } catch (e) {
+      if (isIncompatibleAgentError(e)) {
+        await this.offerRestartWithModel(modelId);
+      } else {
+        vscode.window.showErrorMessage(`Failed to set model: ${(e as Error)?.message ?? String(e)}`);
+      }
+    }
+  }
+
+  /**
+   * The active agent is locked, so the chosen model can only be used in a fresh
+   * session (the CLI's own `suggestion: "start_new_session"`). Confirm with the
+   * user — a restart clears the conversation — then start a new session pinned
+   * to that model (selectedModel makes startSession honor it).
+   */
+  private async offerRestartWithModel(modelId: string): Promise<void> {
+    const name = this.client?.availableModels.find((m) => m.modelId === modelId)?.name ?? modelId;
+    const choice = await vscode.window.showWarningMessage(
+      `${name} runs on a different agent and can't be switched into mid-session. Start a new session with ${name}? The current conversation will be cleared.`,
+      { modal: true },
+      "Start New Session",
+    );
+    if (choice === "Start New Session") {
+      this.selectedModel = modelId;
+      await this.startSession();
     }
   }
 
@@ -342,6 +391,14 @@ See design doc for the full state machine diagram.`;
     }
     this.autoApprove = false;
     if (modeId === "plan") {
+      // Plan only works on plan-capable agents. On others (e.g. cursor /
+      // Composer 2.5) the CLI silently bounces set_mode:"plan" back to "default",
+      // so raising the gate + flipping the button to Plan would be a lie. Don't:
+      // keep the button honest and offer a restart in a plan-capable model.
+      if (this.client && !agentSupportsPlan(this.currentAgentType())) {
+        await this.offerPlanViaRestart();
+        return;
+      }
       this.setPlanActive(true); // posts displayMode → "plan"
       if (this.client) {
         try { await this.client.setMode("plan"); }
@@ -355,6 +412,31 @@ See design doc for the full state machine diagram.`;
       try { await this.client.setMode(ACT_MODE_ID); }
       catch (e) { vscode.window.showErrorMessage(`Couldn't switch mode: ${(e as Error).message}`); }
     }
+  }
+
+  /**
+   * The active model's agent has no plan mode (see setMode). Keep the button on
+   * its real mode and offer to restart in a plan-capable model — switching model
+   * needs a fresh session anyway. Decline → stay put in Agent mode, honestly
+   * labeled. Accept → new session on the plan-capable model, then enter plan.
+   */
+  private async offerPlanViaRestart(): Promise<void> {
+    this.postMode(); // button reflects the real (non-plan) mode, not a lie
+    const planModel = this.client?.availableModels.find((m) => agentSupportsPlan(m.agentType));
+    const current = this.client?.availableModels.find((m) => m.modelId === this.client!.currentModelId);
+    if (!planModel) {
+      vscode.window.showInformationMessage(`Plan mode isn't available on ${current?.name ?? "this model"}.`);
+      return;
+    }
+    const choice = await vscode.window.showWarningMessage(
+      `Plan mode isn't available on ${current?.name ?? "this model"}. Start a fresh ${planModel.name} session in Plan mode? The current conversation will be cleared.`,
+      { modal: true },
+      "Start New Session",
+    );
+    if (choice !== "Start New Session") return;
+    this.selectedModel = planModel.modelId;
+    const client = await this.startSession();
+    if (client) await this.setMode("plan");
   }
 
   /**
@@ -668,6 +750,9 @@ See design doc for the full state machine diagram.`;
     });
     client.on("modelChanged", (id) => {
       if (gen !== this.sessionGen) return;
+      // Only successful switches emit this (acp.ts guards on `Ok`), so it's the
+      // single chokepoint for "the model is now X" — remember it for restarts.
+      this.selectedModel = id;
       this.postModelChanged(id);
     });
     client.on("modeChanged", (id) => {
@@ -793,7 +878,9 @@ See design doc for the full state machine diagram.`;
     try {
       await client.start();
       if (gen !== this.sessionGen) { client.dispose(); return undefined; }
-      const defaultModel = cfg.get<string>("defaultModel", "");
+      // The user's in-session pick wins over the configured default so a restart
+      // reopens on the model they chose (see selectedModel).
+      const defaultModel = this.selectedModel ?? cfg.get<string>("defaultModel", "");
       if (resumeId) {
         // Queue any saved plans BEFORE replay starts so the webview can interleave
         // them inline with user messages as they replay (instead of dumping all
@@ -951,10 +1038,7 @@ See design doc for the full state machine diagram.`;
         this.handleExitPlan(msg.requestId, msg.verdict, msg.comment);
         break;
       case "setModel":
-        if (this.client) {
-          try { await this.client.setModel(msg.modelId); }
-          catch (e) { vscode.window.showErrorMessage(`Failed to set model: ${(e as Error).message}`); }
-        }
+        await this.switchModel(msg.modelId);
         break;
       case "setEffort": {
         const newLevel = msg.level;

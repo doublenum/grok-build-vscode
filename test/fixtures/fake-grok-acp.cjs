@@ -82,7 +82,12 @@ rl.on("line", async (line) => {
     case "session/new":
       return respondOk(id, {
         sessionId: SESSION_ID,
-        models: { currentModelId: "fake-model", availableModels: [] },
+        models: {
+          currentModelId: "fake-model",
+          availableModels: [
+            { modelId: "fake-model", name: "Fake", _meta: { totalContextTokens: 512000, agentType: "grok-build-plan" } },
+          ],
+        },
         modes: { currentModeId: "default", availableModes: [{ id: "default", name: "Agent" }, { id: "plan", name: "Plan" }] },
       });
     case "session/load":

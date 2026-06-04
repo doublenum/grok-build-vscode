@@ -11,11 +11,11 @@
 // current when the session started — if we evolve the primer, old sessions
 // keep their old version unless explicitly re-primed.
 
-export const PRIMER_VERSION = 3;
+export const PRIMER_VERSION = 4;
 
 /** Marker prefix on every primer message so we can identify it in session
  *  records and skip rendering it on restore (a future improvement). */
-export const PRIMER_MARKER = "[grok-build-vscode primer v3]";
+export const PRIMER_MARKER = "[grok-build-vscode primer v4]";
 
 export const GROK_PRIMER = `${PRIMER_MARKER}
 
@@ -25,7 +25,7 @@ This is a system message. The user cannot see it in the UI. Not a secret, but sk
 
 ## Grok Build VS Code extension
 
-This is a Grok Build extension for VS Code developed by Paweł Huryn. The extension is a thin wrapper of Grok Build CLI over ACP with a custom Plan Mode implementation. For more (docs, version history, open source repo, issues): https://marketplace.visualstudio.com/items?itemName=PawelHuryn.grok-vscode-phuryn
+LOCAL DEV BUILD of Grok Build VS Code extension (completely separate identity from the published version).
 
 ## Plan Mode
 
@@ -39,5 +39,16 @@ After \`exit_plan_mode\` resolves, end your turn and wait for the NEXT user mess
 - Anything else → treat as a normal user message
 
 The verdict is **always** in the follow-up message, **never** in the tool result.
+
+## Commit Co-Authorship (Grok Build Identity)
+
+When you release a commit from work you handled fully (as the Grok Build VS Code extension — LOCAL DEV BUILD, separate identity):
+
+- The host extension automatically adds you as co-author using the standard Git trailer:
+  \`Co-authored-by: Grok Build <noreply@grok.x.ai>\`
+- Enforcement lives in TerminalManager: any agent-issued terminal command containing \`git commit\` (from ce-commit, ce-commit-push-pr, lfg, implement skill, direct calls, compound \`&&\` / \`;\` etc.) gets wrapped with a POSIX shell function that injects \`--trailer "Co-authored-by: Grok Build <noreply@grok.x.ai>"\` before the original args. A runtime guard in the wrapper checks "\$*" (joined args, which includes -m bodies) and skips if "Grok Build" is already present, avoiding duplicates.
+- This is the direct equivalent of the Claude Code / Claude Opus pattern (model name + "(Co-author)" attribution + trailer line visible on PRs/commits on GitHub).
+- **Do not** manually insert "Co-authored-by: Grok Build..." (or similar) into the commit messages, subjects, or PR bodies you generate inside skills or prompts. The host layer guarantees it for every agent-driven commit. Manually adding it would risk duplicates or inconsistency.
+- Applies only to commits issued through this Grok Build extension's ACP terminal (the agent's execution surface). Plain \`grok\` CLI sessions outside the extension, or user manual commits in their own terminals, are unaffected — this preserves the "Grok Build" as the distinct co-author for work done inside the extension.
 
 Acknowledge briefly so I know you've read this.`;

@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   extractPromptMeta,
   extractUserQuestion,
+  isIncompatibleAgentError,
   makeAckResponse,
   makeExitPlanResponse,
   makePermissionResponse,
@@ -36,6 +37,43 @@ describe("planModeToolSignal", () => {
     expect(planModeToolSignal({ tool: "read_file" })).toBeNull();
     expect(planModeToolSignal(null)).toBeNull();
     expect(planModeToolSignal({})).toBeNull();
+  });
+});
+
+describe("isIncompatibleAgentError", () => {
+  // The exact rejection shape grok 0.2.22 returns when set_model targets a model
+  // on a different agent than the session has locked in (research/model-agent-probe.cjs).
+  const real = {
+    code: -32600,
+    message:
+      "Cannot switch to model 'grok-composer-2.5-fast': it requires agent 'cursor' but the active agent is 'grok-build-plan'. Start a new session to use this model.",
+    data: {
+      code: "MODEL_SWITCH_INCOMPATIBLE_AGENT",
+      activeAgentType: "grok-build-plan",
+      requiredAgentType: "cursor",
+      modelId: "grok-composer-2.5-fast",
+      suggestion: "start_new_session",
+    },
+  };
+
+  it("matches the structured MODEL_SWITCH_INCOMPATIBLE_AGENT code", () => {
+    expect(isIncompatibleAgentError(real)).toBe(true);
+  });
+
+  it("matches when the code is nested under .error.data (alternate envelope)", () => {
+    expect(isIncompatibleAgentError({ error: { data: { code: "MODEL_SWITCH_INCOMPATIBLE_AGENT" } } })).toBe(true);
+  });
+
+  it("falls back to the message text when no structured code is present", () => {
+    expect(isIncompatibleAgentError({ message: "it requires agent 'cursor' but the active agent is 'x'" })).toBe(true);
+  });
+
+  it("does not misfire on unrelated errors", () => {
+    expect(isIncompatibleAgentError({ code: -32000, message: "no session" })).toBe(false);
+    expect(isIncompatibleAgentError({ data: { code: "SOMETHING_ELSE" } })).toBe(false);
+    expect(isIncompatibleAgentError(null)).toBe(false);
+    expect(isIncompatibleAgentError("string error")).toBe(false);
+    expect(isIncompatibleAgentError({})).toBe(false);
   });
 });
 

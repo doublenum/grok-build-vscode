@@ -4,7 +4,7 @@ VS Code sidebar extension for **xAI's Grok Build CLI**, driven by `grok agent st
 
 ## Status
 
-Local dev build on `feat/open-in-editor-tab`. 243 tests passing (all grok-free). React + Vite webview (`webview/`) powers both the sidebar and "Grok: Open in Editor Tab" surfaces. Each surface (sidebar or editor tab) owns an independent `GrokSidebar` controller + `AcpClient` (deliberate design — no shared session). Hidden v3 primer (`src/grok-primer.ts`) is injected on every `session/new` + `session/load` to explain plan-verdict markers to the CLI (workaround for the CLI's `exit_plan_mode` tool always reporting "approved" regardless of user choice in the plan-review UI).
+Local dev build on `feat/open-in-editor-tab`. 256 tests passing (all grok-free). React + Vite webview (`webview/`) powers both the sidebar and "Grok: Open in Editor Tab" surfaces. Each surface (sidebar or editor tab) owns an independent `GrokSidebar` controller + `AcpClient` (deliberate design — no shared session). Hidden v4 primer (`src/grok-primer.ts`) is injected on every `session/new` + `session/load` to explain plan-verdict markers to the CLI (workaround for the CLI's `exit_plan_mode` tool always reporting "approved" regardless of user choice in the plan-review UI).
 
 ## Module map
 
@@ -24,7 +24,7 @@ Local dev build on `feat/open-in-editor-tab`. 243 tests passing (all grok-free).
 | `src/sessions.ts` | Disk-driven session listing/delete + customName overrides (pure) |
 | `src/file-ref.ts` | Open-file `path#L<n>` ref parsing + large-file inline-read guard (pure) |
 | `src/plan-review.ts` | Plan-snapshot Markdown filename generation for the "open plan as editor tab" action (pure) |
-| `src/grok-primer.ts` | Hidden v3 system prompt (injected on `session/new` + `session/load`) explaining plan verdict markers to the CLI |
+| `src/grok-primer.ts` | Hidden v4 system prompt (injected on `session/new` + `session/load`) explaining plan verdict markers to the CLI |
 | `webview/` + `vite.config.ts` | React + Vite webview (primary UI for sidebar + editor tabs; built to `out/webview` by `npm run build:webview`) |
 | `media/chat.{js,css}` + `media/webview-helpers.js` | Legacy webview UI + helpers (used only by the DOM test harness; not loaded at runtime) |
 | `scripts/install.{ps1,sh}` | Auto-detect VS Code CLI, build .vsix, install |
@@ -38,7 +38,7 @@ Pure modules (`acp-dispatch`, `chips`, `prompt-builder`, `slash-filter`, `cli-lo
 ```bash
 npm install
 npm run build:webview   # React UI (required for sidebar + editor tabs)
-npm test                # 243 tests, ~1.8s, vitest — all grok-free
+npm test                # 256 tests, ~1.8s, vitest — all grok-free
 npm run compile         # or npm run package (includes webview build via vscode:prepublish)
 ```
 
@@ -97,5 +97,5 @@ Per-release: bump version in `package.json`, `npm test`, `npm run publish`. The 
 - Commits explain the *why*, not the *what*
 - Don't introduce abstractions speculatively
 - Don't add comments that explain what well-named code already says
-- 243 tests is the floor — every change should keep that green. All tests are grok-free (no binary spawn); grok-dependent probes live in `research/*.cjs` and are run manually, never by `npm test` or CI
+- 256 tests is the floor — every change should keep that green. All tests are grok-free (no binary spawn); grok-dependent probes live in `research/*.cjs` and are run manually, never by `npm test` or CI
 - **Version bumps are user-initiated.** Iterate at the current version (rebuild the same vsix and reinstall locally) until the user says to bump and publish. Don't bump `package.json` on your own.
